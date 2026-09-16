@@ -28,4 +28,14 @@ test:
 clean:
 	rm -f wireguard-go
 
+
+SCION_FORK   ?= github.com/juagargi/scion
+SCION_BRANCH ?= hummingbird-endhost
+
+hummingbird-update-external-replace:
+	GOFLAGS=-mod=mod GONOSUMDB=* GONOSUMCHECK=1 go mod edit -replace github.com/scionproto/scion=$(SCION_FORK)@$(SCION_BRANCH)
+	go mod tidy
+
+
+
 .PHONY: all clean test install generate-version-and-build

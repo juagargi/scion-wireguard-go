@@ -48,25 +48,3 @@ func reservationRenewalDelay(forwardRes *snetpath.Reservation, renewBeforeSec ui
 	}
 	return untilRenew
 }
-
-// This is workaround of the issue "all bits used, no free color found"
-// After it's fixed, this function can be replaced with:
-//
-//	startTime := uint32(time.Now().Unix())
-//
-// With this change, switchAt also becomes obsolete.
-func renewalRequestStartTimeUnix(forwardRes *snetpath.Reservation) uint32 {
-	now := uint32(time.Now().Unix())
-	if forwardRes == nil {
-		return now
-	}
-	expiresAt, ok := reservationExpirationTime(forwardRes)
-	if !ok {
-		return now
-	}
-	expiration := uint32(expiresAt.Unix())
-	if expiration < now {
-		return now
-	}
-	return expiration
-}

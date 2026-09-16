@@ -417,16 +417,6 @@ func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA)
 			}
 		}
 
-		// When "all bits used, no free color found" issue is fixed, this is obsolete
-		switchAt := time.Now()
-		pm.mu.RLock()
-		if entry.ForwardReservation != nil {
-			if exp, ok := reservationExpirationTime(entry.ForwardReservation); ok {
-				switchAt = exp
-			}
-		}
-		pm.mu.RUnlock()
-
 		fwd, rev, err := pm.requestOneShotReservation(ctx, dest)
 		if err != nil {
 			pm.log.Errorf("Hummingbird reservation renewal for %s failed: %v", dest, err)
@@ -436,17 +426,6 @@ func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA)
 			case <-time.After(2 * time.Second):
 			}
 			continue
-		}
-
-		// When "all bits used, no free color found" issue is fixed, this code fragment is obsolete
-		if wait := time.Until(switchAt); wait > 0 {
-			switchTimer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				switchTimer.Stop()
-				return
-			case <-switchTimer.C:
-			}
 		}
 
 		pm.mu.Lock()
@@ -471,7 +450,6 @@ func (pm *PathManager) requestOneShotReservation(ctx context.Context, dest addr.
 		return nil, nil, fmt.Errorf("no paths to %s", dest)
 	}
 
-	var existingFwd *snetpath.Reservation
 	pm.mu.RLock()
 	entry := pm.cache[dest]
 	selectedIndex := 0
@@ -479,13 +457,12 @@ func (pm *PathManager) requestOneShotReservation(ctx context.Context, dest addr.
 		if entry.SelectedIndex >= 0 && entry.SelectedIndex < len(paths) {
 			selectedIndex = entry.SelectedIndex
 		}
-		existingFwd = entry.ForwardReservation
 	}
 	pm.mu.RUnlock()
 
 	path := paths[selectedIndex]
 
-	startTime := renewalRequestStartTimeUnix(existingFwd)
+	startTime := uint32(time.Now().Unix())
 
 	request := hummingbird.RedemptionRequestNoHop{
 		StartTime: startTime,

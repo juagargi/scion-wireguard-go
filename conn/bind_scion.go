@@ -459,12 +459,17 @@ func (s *ScionNetBind) Send(bufs [][]byte, ep Endpoint) error {
 
 	// Update path if path manager is available
 	if connData.pathManager != nil {
-		if p, err := connData.pathManager.GetPath(scionEp.scionAddr.IA); err == nil {
-			scionEp.setPath(p.Dataplane(), p.UnderlayNextHop())
-		}
-		// A reservation overrides the selected path, together with the next hop.
-		if fwdRes, nextHop, hasRes := connData.pathManager.GetReservation(scionEp.scionAddr.IA); hasRes {
+		ia := scionEp.scionAddr.IA
+		if fwdRes, nextHop, hasRes := connData.pathManager.GetReservation(ia); hasRes {
+			// A forward reservation we bought overrides the selected path and its next hop.
 			scionEp.setPath(fwdRes, nextHop)
+		} else if _, isReservation := scionEp.scionAddr.Path.(*snetpath.Reservation); isReservation {
+			// We hold no forward reservation of our own, but the reply pather has already
+			// installed a reverse reservation the peer advertised onto this endpoint (path
+			// and return next hop both come from the received packet). Keep it: rebuilding
+			// the path from the best-effort pool here would silently drop the reservation.
+		} else if p, err := connData.pathManager.GetPath(ia); err == nil {
+			scionEp.setPath(p.Dataplane(), p.UnderlayNextHop())
 		}
 	}
 

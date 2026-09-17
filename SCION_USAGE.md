@@ -30,12 +30,12 @@ Bandwidth reservations are bought from the Hummingbird marketplaces advertised b
 the ASes of the selected path, who are discovered from the path metadata,
 so only the JWT authenticating this client is configured.
 
-* `USE_HUMMINGBIRD=1`: Buy reservations instead of sending on best-effort SCION paths
+* `HUMMINGBIRD_BANDWIDTH`: Forward bandwidth with a unit, e.g. `10mbps`. Setting it requests
+  reservations instead of sending on best-effort SCION paths; without it Hummingbird is off
 * `SCION_MARKETPLACE_JWT`: Token authenticating this client at the marketplaces (mandatory)
-* `HUMMINGBIRD_BANDWIDTH`: Forward bandwidth with a unit, e.g. `10mbps` (default: `1000kbps`)
-* `HUMMINGBIRD_REVERSE_BANDWIDTH`: Reverse bandwidth; defaults to the forward one
-* `HUMMINGBIRD_BIDIRECTIONAL=0`: Do not reserve the reverse direction at all
-* `HUMMINGBIRD_DURATION`: Lifetime of one reservation (default: `60s`)
+* `HUMMINGBIRD_REVERSE_BANDWIDTH`: Reverse bandwidth (default: none, the reservation is
+  unidirectional). Setting it reserves the reverse direction as well
+* `HUMMINGBIRD_DURATION`: Lifetime of one reservation (mandatory when Hummingbird is requested)
 * `HUMMINGBIRD_RENEWAL_AHEAD`: How long before a reservation expires its replacement
   is bought. It has to cover a full marketplace roundtrip plus its retries (default: `20s`)
 * `HUMMINGBIRD_RESERVATION_OVERLAP`: How long before a reservation expires the traffic

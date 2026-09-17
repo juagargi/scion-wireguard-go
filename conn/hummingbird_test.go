@@ -31,6 +31,8 @@ func TestHummingbirdConfigValidate(t *testing.T) {
 	valid := DefaultHummingbirdConfig()
 	valid.Enabled = true
 	valid.JWT = "token"
+	valid.BandwidthKbps = 1000
+	valid.Duration = 60 * time.Second
 
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("default configuration rejected: %v", err)

@@ -91,13 +91,11 @@ func LoadScionConfigFromEnv() (*ScionConfig, error) {
 
 // Environment variables configuring the Hummingbird reservations.
 const (
-	EnvHummingbirdEnabled          = "USE_HUMMINGBIRD"
 	EnvMarketplaceJWT              = "SCION_MARKETPLACE_JWT"
 	EnvMarketplaceInsecure         = "HUMMINGBIRD_MARKETPLACE_INSECURE"
 	EnvMarketplaceMaxPrice         = "HUMMINGBIRD_MAX_PRICE"
 	EnvHummingbirdBandwidth        = "HUMMINGBIRD_BANDWIDTH"
 	EnvHummingbirdReverseBandwidth = "HUMMINGBIRD_REVERSE_BANDWIDTH"
-	EnvHummingbirdBidirectional    = "HUMMINGBIRD_BIDIRECTIONAL"
 	EnvHummingbirdDuration         = "HUMMINGBIRD_DURATION"
 	EnvHummingbirdRenewalAhead     = "HUMMINGBIRD_RENEWAL_AHEAD"
 	EnvHummingbirdOverlap          = "HUMMINGBIRD_RESERVATION_OVERLAP"
@@ -109,10 +107,20 @@ const (
 // and the durations are Go duration strings such as "60s".
 func LoadHummingbirdConfigFromEnv() (HummingbirdConfig, error) {
 	cfg := DefaultHummingbirdConfig()
-	cfg.Enabled = boolEnv(EnvHummingbirdEnabled, false)
-	if !cfg.Enabled {
+
+	// Hummingbird is requested by giving a forward bandwidth.
+	// Otherwise the tunnel travels on best-effort SCION paths and no marketplace is ever contacted.
+	rawBandwidth := os.Getenv(EnvHummingbirdBandwidth)
+	if rawBandwidth == "" {
 		return cfg, nil
 	}
+	cfg.Enabled = true
+
+	bw, err := bwencoding.ParseBandwidth(rawBandwidth, true)
+	if err != nil {
+		return cfg, fmt.Errorf("parsing %s: %w", EnvHummingbirdBandwidth, err)
+	}
+	cfg.BandwidthKbps = bw
 
 	cfg.JWT = os.Getenv(EnvMarketplaceJWT)
 	cfg.Insecure = boolEnv(EnvMarketplaceInsecure, cfg.Insecure)
@@ -125,26 +133,19 @@ func LoadHummingbirdConfigFromEnv() (HummingbirdConfig, error) {
 		cfg.MaxPrice = price
 	}
 
-	if raw := os.Getenv(EnvHummingbirdBandwidth); raw != "" {
-		bw, err := bwencoding.ParseBandwidth(raw, true)
-		if err != nil {
-			return cfg, fmt.Errorf("parsing %s: %w", EnvHummingbirdBandwidth, err)
-		}
-		cfg.BandwidthKbps = bw
-	}
-
-	// A reservation is bidirectional unless it is turned off or the reverse
-	// bandwidth is given explicitly; by default it mirrors the forward one.
-	cfg.ReverseBandwidthKbps = cfg.BandwidthKbps
-	if !boolEnv(EnvHummingbirdBidirectional, true) {
-		cfg.ReverseBandwidthKbps = 0
-	}
+	// The reverse direction is reserved only when a reverse bandwidth is given;
+	// by default the reservation is unidirectional.
 	if raw := os.Getenv(EnvHummingbirdReverseBandwidth); raw != "" {
 		bw, err := bwencoding.ParseBandwidth(raw, true)
 		if err != nil {
 			return cfg, fmt.Errorf("parsing %s: %w", EnvHummingbirdReverseBandwidth, err)
 		}
 		cfg.ReverseBandwidthKbps = bw
+	}
+
+	// The reservation duration has no default: it must be given explicitly.
+	if os.Getenv(EnvHummingbirdDuration) == "" {
+		return cfg, fmt.Errorf("hummingbird requested but no %s provided", EnvHummingbirdDuration)
 	}
 
 	durations := []struct {
@@ -176,14 +177,11 @@ func DefaultHummingbirdConfig() HummingbirdConfig {
 	return HummingbirdConfig{
 		// The marketplaces of a local topology serve a self-signed certificate,
 		// which no verification can accept.
-		Insecure:             true,
-		MaxPrice:             math.MaxUint64,
-		BandwidthKbps:        defaultBandwidthKbps,
-		ReverseBandwidthKbps: defaultBandwidthKbps,
-		Duration:             defaultReservationDuration,
-		RenewalAhead:         defaultRenewalAhead,
-		ReservationOverlap:   defaultReservationOverlap,
-		StartOffset:          defaultStartOffset,
+		Insecure:           true,
+		MaxPrice:           math.MaxUint64,
+		RenewalAhead:       defaultRenewalAhead,
+		ReservationOverlap: defaultReservationOverlap,
+		StartOffset:        defaultStartOffset,
 	}
 }
 

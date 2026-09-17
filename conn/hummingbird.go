@@ -22,20 +22,21 @@ const (
 	marketplacePurchaseRetries = 3
 )
 
-// Defaults of the tunable Hummingbird parameters.
+// Defaults of the tunable Hummingbird parameters. The forward bandwidth and the
+// reservation duration have no default: they must be given explicitly whenever
+// reservations are requested.
 const (
-	defaultBandwidthKbps       = 1000
-	defaultReservationDuration = 60 * time.Second
-	defaultRenewalAhead        = 20 * time.Second
-	defaultReservationOverlap  = 15 * time.Second
-	defaultStartOffset         = -1 * time.Second
+	defaultRenewalAhead       = 20 * time.Second
+	defaultReservationOverlap = 15 * time.Second
+	defaultStartOffset        = -1 * time.Second
 )
 
 // HummingbirdConfig holds everything needed to buy Hummingbird reservations from
 // the marketplaces of a path, and to keep them fresh.
 type HummingbirdConfig struct {
-	// Enabled turns the reservations on. Without it the tunnel travels on plain
-	// SCION paths and no marketplace is ever contacted.
+	// Enabled turns the reservations on. It is set when a forward bandwidth is
+	// requested; without it the tunnel travels on plain SCION paths and no
+	// marketplace is ever contacted.
 	Enabled bool
 
 	// JWT authenticates this client at the marketplaces of the path.

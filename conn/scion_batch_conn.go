@@ -339,7 +339,11 @@ func (s *ScionBatchConn) readMessages(
 	return s.readIPv6Messages(msgs, ipv6PC, ipv6RxOffload)
 }
 
-func (s *ScionBatchConn) readIPv4Messages(msgs *[]ipv6.Message, ipv4PC *ipv4.PacketConn, rxOffload bool) (int, error) {
+func (s *ScionBatchConn) readIPv4Messages(
+	msgs *[]ipv6.Message,
+	ipv4PC *ipv4.PacketConn,
+	rxOffload bool,
+) (int, error) {
 	if rxOffload {
 		return s.readWithOffload(msgs, func(m []ipv6.Message) (int, error) {
 			_, err := ipv4PC.ReadBatch(m, 0)
@@ -354,7 +358,11 @@ func (s *ScionBatchConn) readIPv4Messages(msgs *[]ipv6.Message, ipv4PC *ipv4.Pac
 	return numMsgs, nil
 }
 
-func (s *ScionBatchConn) readIPv6Messages(msgs *[]ipv6.Message, ipv6PC *ipv6.PacketConn, rxOffload bool) (int, error) {
+func (s *ScionBatchConn) readIPv6Messages(
+	msgs *[]ipv6.Message,
+	ipv6PC *ipv6.PacketConn,
+	rxOffload bool,
+) (int, error) {
 	if rxOffload {
 		return s.readWithOffload(msgs, func(m []ipv6.Message) (int, error) {
 			_, err := ipv6PC.ReadBatch(m, 0)
@@ -403,7 +411,8 @@ func (s *ScionBatchConn) processMessages(
 
 	processedCount := 0
 	for i := 0; i < numMsgs; i++ {
-		if s.processMessage(&(*msgs)[i], &(*scionPkts)[i], scmpHandler, bufs[i], &sizes[i], &eps[i]) {
+		if s.processMessage(&(*msgs)[i], &(*scionPkts)[i],
+			scmpHandler, bufs[i], &sizes[i], &eps[i]) {
 			processedCount++
 		}
 	}
@@ -446,7 +455,10 @@ func (s *ScionBatchConn) processMessage(
 	return s.copyPayload(&udp, buf, size)
 }
 
-func (s *ScionBatchConn) handleSCMPPacket(scionPkt *snet.Packet, scmpHandler snet.SCMPHandler) bool {
+func (s *ScionBatchConn) handleSCMPPacket(
+	scionPkt *snet.Packet,
+	scmpHandler snet.SCMPHandler,
+) bool {
 	if _, ok := scionPkt.Payload.(snet.SCMPPayload); ok {
 		if scmpHandler != nil {
 			if err := scmpHandler.Handle(scionPkt); err != nil {
@@ -528,7 +540,8 @@ func (s *ScionBatchConn) createEndpoint(scionPkt *snet.Packet, udp *snet.UDPPayl
 func (s *ScionBatchConn) copyPayload(udp *snet.UDPPayload, buf []byte, size *int) bool {
 	payloadLen := len(udp.Payload)
 	if payloadLen > len(buf) {
-		s.logger.Verbosef("UDP payload too large (%d bytes) for buffer (%d bytes)", payloadLen, len(buf))
+		s.logger.Verbosef("UDP payload too large (%d bytes) for buffer (%d bytes)",
+			payloadLen, len(buf))
 		return false
 	}
 
@@ -563,18 +576,27 @@ func (s *ScionBatchConn) WriteBatch(
 	ua := s.getUDPAddr()
 	defer s.putUDPAddr(ua)
 
+	// Send() has already pointed the endpoint at the reservation, if there is
+	// one. The reverse reservation rides along on this batch only: taking it
+	// marks it as advertised, and the peer keeps it until the next handover.
 	var fwdRes *snetpath.Reservation
 	var revExtn *slayers.EndToEndExtn
-	if s.pathManager != nil {
-		fwdRes, revExtn, _ = s.pathManager.GetReservations(scionEp.scionAddr.IA)
+	if res, ok := scionEp.scionAddr.Path.(*snetpath.Reservation); ok {
+		fwdRes = res
+		if s.pathManager != nil {
+			revExtn = s.pathManager.TakeReverseExtn(scionEp.scionAddr.IA)
+		}
 	}
 
-	sbufs, err := s.prepareSCIONPackets(scionPkts, scionEp, bufs, ua, ipv4PC != nil, fwdRes, revExtn)
+	sbufs, err := s.prepareSCIONPackets(scionPkts, scionEp, bufs, ua, ipv4PC != nil,
+		fwdRes, revExtn)
 	if err != nil {
 		return err
 	}
 
-	return s.sendBatchWithRetry(ipv4PC, ipv6PC, ipv4TxOffload, ipv6TxOffload, msgs, sbufs, ua, scionEp, bufs)
+	return s.sendBatchWithRetry(ipv4PC, ipv6PC,
+		ipv4TxOffload, ipv6TxOffload,
+		msgs, sbufs, ua, scionEp, bufs)
 }
 
 func (s *ScionBatchConn) prepareSCIONPackets(
@@ -635,7 +657,11 @@ func (s *ScionBatchConn) prepareSCIONPackets(
 	return sbufs, nil
 }
 
-func (s *ScionBatchConn) prepareUDPAddress(ua *net.UDPAddr, scionEp *ScionNetEndpoint, isIPv4 bool) {
+func (s *ScionBatchConn) prepareUDPAddress(
+	ua *net.UDPAddr,
+	scionEp *ScionNetEndpoint,
+	isIPv4 bool,
+) {
 	dstIP := scionEp.StdNetEndpoint.DstIP()
 
 	// Check if IP is zero value to prevent panic
@@ -743,7 +769,12 @@ func (s *ScionBatchConn) sendIPv6Batch(
 	return s.sendv6(ipv6PC, (*msgs)[:len(bufs)])
 }
 
-func (s *ScionBatchConn) handleGSOError(err error, isIPv4 bool, ipv4TxOffload, ipv6TxOffload *bool) bool {
+func (s *ScionBatchConn) handleGSOError(
+	err error,
+	isIPv4 bool,
+	ipv4TxOffload *bool,
+	ipv6TxOffload *bool,
+) bool {
 	if !errShouldDisableUDPGSO(err) {
 		return false
 	}
@@ -775,7 +806,10 @@ func (s *ScionBatchConn) sendv6(pc *ipv6.PacketConn, msgs []ipv6.Message) error 
 	}, msgs)
 }
 
-func (s *ScionBatchConn) sendBatchMessages(writeBatch func([]ipv6.Message) (int, error), msgs []ipv6.Message) error {
+func (s *ScionBatchConn) sendBatchMessages(
+	writeBatch func([]ipv6.Message) (int, error),
+	msgs []ipv6.Message,
+) error {
 	for start := 0; start < len(msgs); {
 		n, err := writeBatch(msgs[start:])
 		if err != nil {

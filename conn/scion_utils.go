@@ -251,7 +251,12 @@ func Serialize(p *snet.Packet, fwdRes *snetpath.Reservation, revExtn *slayers.En
 //
 // Note: If any packet fails validation, the function returns immediately
 // without modifying any packets (atomic operation).
-func SerializeBatch(pkts []snet.Packet, bufs [][]byte, fwdRes *snetpath.Reservation, revExtn *slayers.EndToEndExtn) error {
+func SerializeBatch(
+	pkts []snet.Packet,
+	bufs [][]byte,
+	fwdRes *snetpath.Reservation,
+	revExtn *slayers.EndToEndExtn,
+) error {
 	if len(pkts) == 0 {
 		return nil
 	}

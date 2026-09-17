@@ -70,17 +70,13 @@ type connData struct {
 
 // ScionConfig holds SCION-specific configuration
 type ScionConfig struct {
-	DaemonAddr     string
-	LocalAS        addr.AS
-	PathPolicy     PathPolicy
-	LocalIA        addr.IA
-	LocalIP        net.IP
-	LocalPort      uint16
-	Reserve        bool
-	Bidirectional  bool
-	BandwidthKBps  uint16
-	DurationSec    uint16
-	RenewBeforeSec uint16
+	DaemonAddr  string
+	LocalAS     addr.AS
+	PathPolicy  PathPolicy
+	LocalIA     addr.IA
+	LocalIP     net.IP
+	LocalPort   uint16
+	Hummingbird HummingbirdConfig
 }
 
 type PathPolicy int
@@ -188,22 +184,23 @@ func (s *ScionNetBind) initSCION() error {
 		s.config.LocalIA = localIA
 	}
 
-	start, end, err := s.daemonConn.PortRange(ctx)
+	// The topology is needed by the marketplace client to QUIC-dial it, if it's available
+	// under SCION.
+	topo, err := daemon.LoadTopology(ctx, s.daemonConn)
 	if err != nil {
-		return fmt.Errorf("failed to get port ranges from daemon: %w", err)
+		return fmt.Errorf("failed to load topology from daemon: %w", err)
 	}
+	topo.LocalIA = s.config.LocalIA
 
 	// Initialize SCION network with proper topology
 	s.scionNetwork = &snet.SCIONNetwork{
-		Topology: snet.Topology{
-			LocalIA: s.config.LocalIA,
-			PortRange: snet.TopologyPortRange{
-				Start: start,
-				End:   end,
-			},
-		},
+		Topology:    topo,
 		ReplyPather: snetpath.NewHummReplyPather(),
 		Metrics:     snet.SCIONNetworkMetrics{},
+	}
+
+	if s.config.Hummingbird.Enabled && s.config.Hummingbird.Insecure {
+		s.logger.Errorf("Hummingbird: marketplace certificate validation is disabled")
 	}
 
 	s.pathManager = NewPathManager(
@@ -212,12 +209,8 @@ func (s *ScionNetBind) initSCION() error {
 		s.config.PathPolicy, // selection policy
 		s.logger,
 		WithRefreshInterval(5*time.Minute),
-		WithLocalIP(s.config.LocalIP),
-		WithReserve(s.config.Reserve),
-		WithBidirectional(s.config.Bidirectional),
-		WithBandwidth(s.config.BandwidthKBps),
-		WithDuration(s.config.DurationSec),
-		WithRenewBefore(s.config.RenewBeforeSec),
+		WithTopology(topo),
+		WithHummingbird(s.config.Hummingbird),
 	)
 	s.logger.Verbosef("SCION network initialized with IA %s", s.config.LocalIA)
 
@@ -467,12 +460,11 @@ func (s *ScionNetBind) Send(bufs [][]byte, ep Endpoint) error {
 	// Update path if path manager is available
 	if connData.pathManager != nil {
 		if p, err := connData.pathManager.GetPath(scionEp.scionAddr.IA); err == nil {
-			if fwdRes, _, hasRes := connData.pathManager.GetReservations(scionEp.scionAddr.IA); hasRes && fwdRes != nil {
-				scionEp.scionAddr.Path = fwdRes
-			} else {
-				scionEp.scionAddr.Path = p.Dataplane()
-			}
-			scionEp.scionAddr.NextHop = p.UnderlayNextHop()
+			scionEp.setPath(p.Dataplane(), p.UnderlayNextHop())
+		}
+		// A reservation overrides the selected path, together with the next hop.
+		if fwdRes, nextHop, hasRes := connData.pathManager.GetReservation(scionEp.scionAddr.IA); hasRes {
+			scionEp.setPath(fwdRes, nextHop)
 		}
 	}
 
@@ -521,12 +513,12 @@ func (s *ScionNetBind) ParseEndpoint(str string) (Endpoint, error) {
 		if pathManager != nil {
 			pathManager.RegisterEndpoint(scionAddr.IA)
 			if p, err := pathManager.GetPath(scionAddr.IA); err == nil {
-				if fwdRes, _, hasRes := pathManager.GetReservations(scionAddr.IA); hasRes && fwdRes != nil {
-					scionAddr.Path = fwdRes
-				} else {
-					scionAddr.Path = p.Dataplane()
-				}
+				scionAddr.Path = p.Dataplane()
 				scionAddr.NextHop = p.UnderlayNextHop()
+				if fwdRes, nextHop, hasRes := pathManager.GetReservation(scionAddr.IA); hasRes {
+					scionAddr.Path = fwdRes
+					scionAddr.NextHop = nextHop
+				}
 
 				// Use optimized IP address conversion
 				addr, _ := convertIPToAddr(scionAddr.NextHop.IP)
@@ -577,6 +569,18 @@ func (e *ScionNetEndpoint) SetScionAndIPAddresses(scionAddr *snet.UDPAddr) {
 			e.StdNetEndpoint.AddrPort = netip.AddrPortFrom(
 				addr, uint16(scionAddr.NextHop.Port))
 		}
+	}
+}
+
+// setPath points the endpoint at a dataplane path and at the nextHop border router.
+func (e *ScionNetEndpoint) setPath(path snet.DataplanePath, nextHop *net.UDPAddr) {
+	if e.scionAddr == nil || path == nil || nextHop == nil {
+		return
+	}
+	e.scionAddr.Path = path
+	e.scionAddr.NextHop = nextHop
+	if addr, err := convertIPToAddr(nextHop.IP); err == nil {
+		e.StdNetEndpoint.AddrPort = netip.AddrPortFrom(addr, uint16(nextHop.Port))
 	}
 }
 

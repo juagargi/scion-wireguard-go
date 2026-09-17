@@ -24,6 +24,36 @@ Before launching `wireguard-go`, set:
 
 ---
 
+## Hummingbird Reservations
+
+Bandwidth reservations are bought from the Hummingbird marketplaces advertised by
+the ASes of the selected path, who are discovered from the path metadata,
+so only the JWT authenticating this client is configured.
+
+* `USE_HUMMINGBIRD=1`: Buy reservations instead of sending on best-effort SCION paths
+* `SCION_MARKETPLACE_JWT`: Token authenticating this client at the marketplaces (mandatory)
+* `HUMMINGBIRD_BANDWIDTH`: Forward bandwidth with a unit, e.g. `10mbps` (default: `1000kbps`)
+* `HUMMINGBIRD_REVERSE_BANDWIDTH`: Reverse bandwidth; defaults to the forward one
+* `HUMMINGBIRD_BIDIRECTIONAL=0`: Do not reserve the reverse direction at all
+* `HUMMINGBIRD_DURATION`: Lifetime of one reservation (default: `60s`)
+* `HUMMINGBIRD_RENEWAL_AHEAD`: How long before a reservation expires its replacement
+  is bought. It has to cover a full marketplace roundtrip plus its retries (default: `20s`)
+* `HUMMINGBIRD_RESERVATION_OVERLAP`: How long before a reservation expires the traffic
+  switches to its replacement (default: `15s`, must not exceed the renewal ahead)
+* `HUMMINGBIRD_START_OFFSET`: Negative offset applied to the start time a reservation is
+  bought with, to tolerate border routers whose clock lags ours (default: `-1s`)
+* `HUMMINGBIRD_MAX_PRICE`: Most this client will pay for one reservation (default: unlimited)
+* `HUMMINGBIRD_MARKETPLACE_INSECURE=0`: Validate the marketplace server certificate.
+  It defaults to `1`, since the marketplaces of a local topology serve self-signed ones.
+
+Both reservations of a handover are valid at the same time, but only one of them
+ever carries traffic: the replacement is bought `RENEWAL_AHEAD` before the expiry
+and takes over at `RESERVATION_OVERLAP` before it, which leaves the roundtrip room
+to fail and be retried. If no purchase succeeds before the current reservation
+expires, the tunnel falls back to the plain SCION path until one does.
+
+---
+
 ## Notes
 
 * Use `socat` instead of `wg` to interact with the UAPI socket for SCION configurations.
@@ -143,8 +173,8 @@ EOF
 
 ```
 "shortest"  (default)
-"bandwidth" 
-"latency"  
+"bandwidth"
+"latency"
 "first"
 ```
 

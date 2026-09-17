@@ -20,8 +20,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/daemon"
 	"github.com/scionproto/scion/pkg/daemon/types" // Add this line
-	"github.com/scionproto/scion/pkg/hummingbird"
-	"github.com/scionproto/scion/pkg/hummingbird/redemption"
+	"github.com/scionproto/scion/pkg/hummingbird/marketplace"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/snet"
 	snetpath "github.com/scionproto/scion/pkg/snet/path"
@@ -40,10 +39,10 @@ type PathCacheEntry struct {
 	LastRefresh        time.Time             // When paths were last refreshed
 	PathRanks          []PathRank            // Ranking information for each path
 	LastError          error                 // Last error encountered during refresh
-	ForwardReservation *snetpath.Reservation // Active forward Hummingbird reservation
-	ReverseExtn        *slayers.EndToEndExtn // Active reverse Hummingbird reservation extension
+	ForwardReservation *snetpath.Reservation // Reservation currently carrying traffic
+	ReservationNextHop *net.UDPAddr          // Underlay next hop of the path it was bought for
+	PendingReverseExtn *slayers.EndToEndExtn // Reverse reservation still to be advertised
 	CancelRenewal      context.CancelFunc    // Cancel routine for renewal loop
-	LastReverseExtn    *slayers.EndToEndExtn // Last sent reverse extension to avoid redundant sends
 }
 
 // PathRank contains ranking information for a single path
@@ -86,12 +85,8 @@ type PathManager struct {
 	httpServer *http.Server // Added for the API server
 
 	// Hummingbird settings
-	reserve        bool
-	bidirectional  bool
-	bandwidthKBps  uint16
-	durationSec    uint16
-	renewBeforeSec uint16
-	localIP        net.IP
+	humm HummingbirdConfig
+	topo snet.Topology
 }
 
 // NewPathManager wires up a new path manager.  The background refresh only
@@ -127,28 +122,16 @@ func WithRefreshInterval(d time.Duration) PathManagerOption {
 	return func(pm *PathManager) { pm.refresh = d }
 }
 
-func WithLocalIP(ip net.IP) PathManagerOption {
-	return func(pm *PathManager) { pm.localIP = ip }
+// WithHummingbird configures the Hummingbird reservations. Without it the
+// manager only resolves plain SCION paths.
+func WithHummingbird(cfg HummingbirdConfig) PathManagerOption {
+	return func(pm *PathManager) { pm.humm = cfg }
 }
 
-func WithReserve(reserve bool) PathManagerOption {
-	return func(pm *PathManager) { pm.reserve = reserve }
-}
-
-func WithBidirectional(bidi bool) PathManagerOption {
-	return func(pm *PathManager) { pm.bidirectional = bidi }
-}
-
-func WithBandwidth(bw uint16) PathManagerOption {
-	return func(pm *PathManager) { pm.bandwidthKBps = bw }
-}
-
-func WithDuration(dur uint16) PathManagerOption {
-	return func(pm *PathManager) { pm.durationSec = dur }
-}
-
-func WithRenewBefore(rb uint16) PathManagerOption {
-	return func(pm *PathManager) { pm.renewBeforeSec = rb }
+// WithTopology provides the local topology, which the marketplace client needs
+// to reach the marketplaces that are addressed over SCION.
+func WithTopology(topo snet.Topology) PathManagerOption {
+	return func(pm *PathManager) { pm.topo = topo }
 }
 
 // Start kicks off the periodic refresh goroutine.  Calling Start multiple
@@ -246,19 +229,32 @@ func (pm *PathManager) GetPath(ia addr.IA) (snet.Path, error) {
 	return entry.Paths[entry.SelectedIndex], nil
 }
 
-// GetReservations retrieves the active forward and reverse Hummingbird reservations.
-func (pm *PathManager) GetReservations(ia addr.IA) (*snetpath.Reservation, *slayers.EndToEndExtn, bool) {
+// GetReservation returns the Hummingbird reservation currently carrying traffic to ia,
+// together with the underlay next hop of the path it was bought for.
+func (pm *PathManager) GetReservation(ia addr.IA) (*snetpath.Reservation, *net.UDPAddr, bool) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	entry := pm.cache[ia]
+	if entry == nil || entry.ForwardReservation == nil {
+		return nil, nil, false
+	}
+	return entry.ForwardReservation, entry.ReservationNextHop, true
+}
+
+// TakeReverseExtn returns the reverse-reservation extension that still has to be
+// advertised to ia, and marks it as handed out. Every reservation yields its
+// extension exactly once, so that it travels on a single batch and the peer
+// keeps using it until the next handover replaces it.
+func (pm *PathManager) TakeReverseExtn(ia addr.IA) *slayers.EndToEndExtn {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	entry := pm.cache[ia]
-	if entry == nil || !pm.reserve {
-		return nil, nil, false
+	if entry == nil {
+		return nil
 	}
-	if entry.ReverseExtn != entry.LastReverseExtn {
-		entry.LastReverseExtn = entry.ReverseExtn
-		return entry.ForwardReservation, entry.ReverseExtn, true
-	}
-	return entry.ForwardReservation, nil, true
+	extn := entry.PendingReverseExtn
+	entry.PendingReverseExtn = nil
+	return extn
 }
 
 func (pm *PathManager) refreshAll() {
@@ -377,7 +373,7 @@ func (pm *PathManager) refreshOne(dest addr.IA) error {
 	entry.LastRefresh = time.Now()
 	entry.LastError = nil
 
-	if pm.reserve && entry.CancelRenewal == nil && len(paths) > 0 {
+	if pm.humm.Enabled && entry.CancelRenewal == nil && len(paths) > 0 {
 		ctx, cancel := context.WithCancel(pm.ctx)
 		entry.CancelRenewal = cancel
 		go pm.reservationRenewalLoop(ctx, dest)
@@ -386,6 +382,31 @@ func (pm *PathManager) refreshOne(dest addr.IA) error {
 	return nil
 }
 
+// Reservation purchase constants.
+const (
+	// Attempts of one purchase before the renewal gives up on this round.
+	purchaseAttempts = 5
+
+	// Backoff between the first two attempts; it doubles after every one.
+	purchaseBackoff = 500 * time.Millisecond
+
+	// Budget of a single attempt.
+	purchaseTimeout = 10 * time.Second
+
+	// How long to wait before starting a new round after one gave up.
+	renewalRetryDelay = time.Second
+)
+
+// reservationRenewalLoop keeps a reservation to dest available for as long as
+// the destination is in use.
+//
+// Every round buys the replacement RenewalAhead before the current reservation expires,
+// and starts sending on it ReservationOverlap before that same instant.
+// The two reservations are therefore valid at the same time, but only one of
+// them ever carries traffic: the window between the purchase and the handover
+// absorbs the marketplace roundtrip and its retries, and the window between the
+// handover and the expiry keeps a slow handover from falling off the end of the
+// old reservation.
 func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -393,98 +414,194 @@ func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA)
 		}
 	}()
 
-	for {
-		pm.mu.RLock()
-		entry := pm.cache[dest]
-		pm.mu.RUnlock()
+	// The first reservation is bought and used immediately.
+	now := time.Now()
+	requestAt, handoverAt, startAt := now, now, now.Add(pm.humm.StartOffset)
 
-		if entry == nil {
+	for {
+		if !sleepUntil(ctx, requestAt) {
 			return
 		}
 
-		pm.mu.RLock()
-		forwardRes := entry.ForwardReservation
-		pm.mu.RUnlock()
-
-		if forwardRes != nil {
-			wait := reservationRenewalDelay(forwardRes, pm.renewBeforeSec, pm.durationSec)
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-		}
-
-		fwd, rev, err := pm.requestOneShotReservation(ctx, dest)
+		rsv, nextHop, err := pm.buyReservationWithRetry(ctx, dest, startAt)
 		if err != nil {
-			pm.log.Errorf("Hummingbird reservation renewal for %s failed: %v", dest, err)
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
-			case <-time.After(2 * time.Second):
 			}
+			pm.log.Errorf("Buying Hummingbird reservation for %s failed: %v", dest, err)
+			// The current reservation, if any, keeps carrying traffic until it expires.
+			// Once it does, drop it so that the datapath falls back to the plain SCION path,
+			// instead of sending on a dead reservation.
+			if pm.dropExpiredReservation(dest) {
+				pm.log.Errorf("Hummingbird reservation for %s expired without a successful renewal",
+					dest)
+			}
+			requestAt = time.Now().Add(renewalRetryDelay)
+			handoverAt = requestAt
+			startAt = requestAt.Add(pm.humm.StartOffset)
 			continue
 		}
 
-		pm.mu.Lock()
-		entry = pm.cache[dest]
-		if entry != nil {
-			entry.ForwardReservation = fwd
-			entry.ReverseExtn = rev
+		// The marketplace may have sold a window shorter than the one asked for,
+		// so never hand traffic over to a reservation that is already dead.
+		expiry := rsv.Expiry()
+		if !expiry.After(time.Now()) {
+			pm.log.Errorf("Hummingbird reservation bought for %s expired at %s before being used",
+				dest, expiry)
+			requestAt = time.Now().Add(renewalRetryDelay)
+			handoverAt = requestAt
+			startAt = requestAt.Add(pm.humm.StartOffset)
+			continue
 		}
-		pm.mu.Unlock()
+
+		if !sleepUntil(ctx, handoverAt) {
+			return
+		}
+		pm.installReservation(dest, rsv, nextHop)
+
+		pm.log.Verbosef("Hummingbird reservation for %s in use, expires at %s", dest, expiry)
+		requestAt, handoverAt, startAt = renewalSchedule(expiry,
+			pm.humm.RenewalAhead, pm.humm.ReservationOverlap, pm.humm.StartOffset)
 	}
 }
 
-func (pm *PathManager) requestOneShotReservation(ctx context.Context, dest addr.IA) (*snetpath.Reservation, *slayers.EndToEndExtn, error) {
-	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+// buyReservationWithRetry retries a failed purchase with an exponential backoff,
+// since an asset may well have been sold to somebody else between the moment it
+// was found and the moment it was paid for.
+func (pm *PathManager) buyReservationWithRetry(
+	ctx context.Context,
+	dest addr.IA,
+	startAt time.Time,
+) (*snetpath.Reservation, *net.UDPAddr, error) {
+	backoff := purchaseBackoff
+	var lastErr error
+	for attempt := 1; attempt <= purchaseAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		rsv, nextHop, err := pm.buyReservation(ctx, dest, startAt)
+		if err == nil {
+			return rsv, nextHop, nil
+		}
+		lastErr = err
+		pm.log.Verbosef("Buying Hummingbird reservation for %s failed (attempt %d/%d): %v",
+			dest, attempt, purchaseAttempts, err)
+		if attempt == purchaseAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return nil, nil, lastErr
+}
+
+// buyReservation buys the flyovers of the currently selected path to dest from
+// the marketplace covering it, and those of the reverse direction when the
+// configuration asks for a bidirectional reservation.
+// startAt is when the reservation becomes valid, slightly before it starts carrying traffic.
+func (pm *PathManager) buyReservation(
+	ctx context.Context,
+	dest addr.IA,
+	startAt time.Time,
+) (*snetpath.Reservation, *net.UDPAddr, error) {
+	ctx, cancel := context.WithTimeout(ctx, purchaseTimeout)
 	defer cancel()
 
-	paths, err := pm.d.Paths(ctx, dest, pm.localIA, types.PathReqFlags{})
+	path, err := pm.GetPath(dest)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load paths: %w", err)
-	}
-	if len(paths) == 0 {
-		return nil, nil, fmt.Errorf("no paths to %s", dest)
+		return nil, nil, err
 	}
 
-	pm.mu.RLock()
+	// Whole seconds: a flyover carries its start time and its duration in
+	// seconds, and the marketplace matches the assets it sold on exactly the
+	// timestamps it was asked for.
+	startsAt := startAt.Truncate(time.Second)
+	stopsAt := startsAt.Add(pm.humm.Duration)
+
+	rsv, err := marketplace.OneShotReservation(
+		ctx,
+		path,
+		pm.humm.JWT,
+		daemon.Querier{Connector: pm.d, IA: pm.localIA},
+		pm.topo,
+		pm.humm.Insecure,
+		pm.humm.BandwidthKbps,
+		pm.humm.ReverseBandwidthKbps,
+		startsAt,
+		stopsAt,
+		pm.humm.MaxPrice,
+		marketplaceBuyMode,
+		marketplaceFetchReservations,
+		marketplaceCombineAssets,
+		marketplacePurchaseRetries,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marketplace reservation: %w", err)
+	}
+	return rsv, path.UnderlayNextHop(), nil
+}
+
+// installReservation makes rsv the reservation that carries the traffic to dest.
+func (pm *PathManager) installReservation(
+	dest addr.IA,
+	rsv *snetpath.Reservation,
+	nextHop *net.UDPAddr,
+) {
+	extn, err := rsv.EndToEndExtn()
+	if err != nil {
+		pm.log.Errorf("Reverse Hummingbird reservation for %s unusable: %v", dest, err)
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
 	entry := pm.cache[dest]
-	selectedIndex := 0
-	if entry != nil {
-		if entry.SelectedIndex >= 0 && entry.SelectedIndex < len(paths) {
-			selectedIndex = entry.SelectedIndex
-		}
+	if entry == nil {
+		return
 	}
-	pm.mu.RUnlock()
+	entry.ForwardReservation = rsv
+	entry.ReservationNextHop = nextHop
+	entry.PendingReverseExtn = extn
+}
 
-	path := paths[selectedIndex]
-
-	startTime := uint32(time.Now().Unix())
-
-	request := hummingbird.RedemptionRequestNoHop{
-		StartTime: startTime,
-		Bw:        pm.bandwidthKBps,
-		Duration:  pm.durationSec,
+// dropExpiredReservation forgets the reservation of dest once it has expired,
+// and reports whether it dropped one.
+func (pm *PathManager) dropExpiredReservation(dest addr.IA) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	entry := pm.cache[dest]
+	if entry == nil || entry.ForwardReservation == nil {
+		return false
 	}
-
-	var reverseBw uint16
-	if pm.bidirectional {
-		reverseBw = pm.bandwidthKBps
+	if time.Now().Before(entry.ForwardReservation.Expiry()) {
+		return false
 	}
+	entry.ForwardReservation = nil
+	entry.ReservationNextHop = nil
+	entry.PendingReverseExtn = nil
+	return true
+}
 
-	fwd, err := redemption.OneShotReservation(ctx, pm.d, pm.localIP, path, request, reverseBw)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reservation negotiation: %w", err)
+// sleepUntil waits until t, reporting false if ctx was cancelled first.
+func sleepUntil(ctx context.Context, t time.Time) bool {
+	if ctx.Err() != nil {
+		return false
 	}
-
-	rev, err := fwd.EndToEndExtn()
-	if err != nil {
-		return nil, nil, fmt.Errorf("reverse reservation extension: %w", err)
+	wait := time.Until(t)
+	if wait <= 0 {
+		return true
 	}
-	return fwd, rev, nil
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // SetPolicy sets the path selection policy

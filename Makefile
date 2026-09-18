@@ -17,7 +17,7 @@ generate-version-and-build:
 	@$(MAKE) wireguard-go
 
 wireguard-go: $(wildcard *.go) $(wildcard */*.go)
-	go build -v -o "$@"
+	CGO_ENABLED=0 go build -v -o "$@"
 
 install: wireguard-go
 	@install -v -d "$(DESTDIR)$(BINDIR)" && install -v -m 0755 "$<" "$(DESTDIR)$(BINDIR)/wireguard-go"
@@ -27,5 +27,15 @@ test:
 
 clean:
 	rm -f wireguard-go
+
+
+SCION_FORK   ?= github.com/juagargi/scion
+SCION_BRANCH ?= hummingbird-endhost
+
+hummingbird-update-external-replace:
+	GOFLAGS=-mod=mod GONOSUMDB=* GONOSUMCHECK=1 go mod edit -replace github.com/scionproto/scion=$(SCION_FORK)@$(SCION_BRANCH)
+	go mod tidy
+
+
 
 .PHONY: all clean test install generate-version-and-build

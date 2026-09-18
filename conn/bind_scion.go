@@ -42,6 +42,14 @@ type ScionNetBind struct {
 	// Path management
 	pathManager *PathManager
 
+	// replyPather is the single, canonical reply pather shared by every receive
+	// path (both the batch conn and the fallback snet.Conn). It is always a
+	// HummReplyPather, unconditionally and independently of this node's own
+	// Hummingbird configuration: a peer that advertises a reverse reservation
+	// must be able to have it installed and used on our replies even when we buy
+	// no reservations ourselves. See initSCION.
+	replyPather snet.ReplyPather
+
 	// Configuration
 	config *ScionConfig
 
@@ -192,10 +200,15 @@ func (s *ScionNetBind) initSCION() error {
 	}
 	topo.LocalIA = s.config.LocalIA
 
+	// The reply pather is created once and shared with every receive path, so a
+	// reverse reservation a peer advertises is honored regardless of our own
+	// Hummingbird configuration. See the replyPather field.
+	s.replyPather = snetpath.NewHummReplyPather()
+
 	// Initialize SCION network with proper topology
 	s.scionNetwork = &snet.SCIONNetwork{
 		Topology:    topo,
-		ReplyPather: snetpath.NewHummReplyPather(),
+		ReplyPather: s.replyPather,
 		Metrics:     snet.SCIONNetworkMetrics{},
 	}
 
@@ -312,6 +325,9 @@ func (s *ScionNetBind) Open(port uint16) ([]ReceiveFunc, uint16, error) {
 			)
 			scmpHandler := s.scionNetwork.SCMPHandler
 			s.batchConn.SetSCMPHandler(scmpHandler)
+			// Share the bind's canonical reply pather so reverse reservations are
+			// installed and reused regardless of which receive path is active.
+			s.batchConn.SetReplyPather(s.replyPather)
 			actualPort = uint16(s.batchConn.LocalAddr().(*net.UDPAddr).Port)
 
 			// Update cached connection data

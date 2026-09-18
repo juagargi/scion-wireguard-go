@@ -119,6 +119,8 @@ func NewScionBatchConnWithConfig(
 		topology:    topology,
 		pathManager: pathManager,
 		logger:      logger,
+		// Default reply pather; the bind overrides this with its shared instance
+		// via SetReplyPather so both receive paths consult one reservation cache.
 		replyPather: snetpath.NewHummReplyPather(),
 		batchSize:   1,
 	}
@@ -254,6 +256,19 @@ func (s *ScionBatchConn) SetSCMPHandler(handler snet.SCMPHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.scmpHandler = handler
+}
+
+// SetReplyPather replaces the reply pather used when receiving packets. The bind
+// calls this to share a single reply pather across every receive path, so the
+// reverse reservations a peer advertises are cached in one place. A nil pather
+// is ignored, leaving the constructor default in place.
+func (s *ScionBatchConn) SetReplyPather(rp snet.ReplyPather) {
+	if rp == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replyPather = rp
 }
 
 func (s *ScionBatchConn) LocalAddr() net.Addr {

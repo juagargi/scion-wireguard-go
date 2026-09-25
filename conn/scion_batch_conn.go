@@ -347,11 +347,21 @@ func (s *ScionBatchConn) readMessages(
 		(*msgs)[i].Buffers[0] = bufs[i]
 		(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
 	}
-
+	var numMessages int
+	var err error
 	if ipv4PC != nil {
-		return s.readIPv4Messages(msgs, ipv4PC, ipv4RxOffload)
+		numMessages, err = s.readIPv4Messages(msgs, ipv4PC, ipv4RxOffload)
+	} else {
+		numMessages, err = s.readIPv6Messages(msgs, ipv6PC, ipv6RxOffload)
 	}
-	return s.readIPv6Messages(msgs, ipv6PC, ipv6RxOffload)
+	if err == nil {
+		var receivedBytes uint64
+		for i := 0; i < numMessages; i++ {
+			receivedBytes += uint64((*msgs)[i].N)
+		}
+		s.pathManager.metrics.BytesReceived.Add(float64(receivedBytes))
+	}
+	return numMessages, err
 }
 
 func (s *ScionBatchConn) readIPv4Messages(
@@ -830,6 +840,11 @@ func (s *ScionBatchConn) sendBatchMessages(
 		if err != nil {
 			return err
 		}
+		bytesSent := uint64(0)
+		for i := start; i < n; i++ {
+			bytesSent += uint64(msgs[i].N)
+		}
+		s.pathManager.metrics.BytesSent.Add(float64(bytesSent))
 		start += n
 	}
 	return nil

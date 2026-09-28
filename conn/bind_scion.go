@@ -147,6 +147,8 @@ var (
 	_ Endpoint = &ScionNetEndpoint{}
 )
 
+var wireguardMetrics = NewMetrics()
+
 func NewScionNetBind(config *ScionConfig, logger Logger) *ScionNetBind {
 	useBatch := os.Getenv("USE_BATCH") == "1"
 	if useBatch {
@@ -212,9 +214,10 @@ func (s *ScionNetBind) initSCION() error {
 
 	// Initialize SCION network with proper topology
 	s.scionNetwork = &snet.SCIONNetwork{
-		Topology:    topo,
-		ReplyPather: s.replyPather,
-		Metrics:     snet.SCIONNetworkMetrics{},
+		Topology:          topo,
+		ReplyPather:       s.replyPather,
+		Metrics:           snet.SCIONNetworkMetrics{},
+		PacketConnMetrics: wireguardMetrics.SCIONPacketConnMetrics,
 	}
 
 	if s.config.Hummingbird.Enabled && s.config.Hummingbird.Insecure {
@@ -230,6 +233,7 @@ func (s *ScionNetBind) initSCION() error {
 		WithTopology(topo),
 		WithHummingbird(s.config.Hummingbird),
 		WithPathFilters(s.pathFilters),
+		WithMetrics(wireguardMetrics),
 	)
 	s.logger.Verbosef("SCION network initialized with IA %s", s.config.LocalIA)
 

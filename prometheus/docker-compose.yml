@@ -1,0 +1,17 @@
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: wireguard-prometheus
+    network_mode: host
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.listen-address=:${PROMETHEUS_PORT:-8090}"
+    volumes:
+      # The whole directory rather than the two files, so that rewriting either of them
+      # directly shows the changes in the container.
+      - ./:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+
+volumes:
+  prometheus-data:

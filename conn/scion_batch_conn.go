@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/scionproto/scion/pkg/addr"
+	metricsv2 "github.com/scionproto/scion/pkg/metrics/v2"
 	"github.com/scionproto/scion/pkg/private/common"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/snet"
@@ -36,13 +37,14 @@ var (
 
 // ScionBatchConn provides batch send/receive capabilities for SCION packets
 type ScionBatchConn struct {
-	mu          sync.RWMutex
-	conn        *net.UDPConn
-	ipv4PC      *ipv4.PacketConn
-	ipv6PC      *ipv6.PacketConn
-	localIA     addr.IA
-	localAddr   *net.UDPAddr
-	topology    snet.Topology
+	mu        sync.RWMutex
+	conn      *net.UDPConn
+	ipv4PC    *ipv4.PacketConn
+	ipv6PC    *ipv6.PacketConn
+	localIA   addr.IA
+	localAddr *net.UDPAddr
+	topology  snet.Topology
+	// pathManager is never nil, and is dereferenced below without checking.
 	pathManager *PathManager
 	scmpHandler snet.SCMPHandler
 	replyPather snet.ReplyPather
@@ -286,6 +288,7 @@ func (s *ScionBatchConn) Close() error {
 	}
 	s.closed = true
 
+	metricsv2.CounterInc(s.metrics().Closes)
 	return s.closeConnections()
 }
 
@@ -313,6 +316,11 @@ func (s *ScionBatchConn) BatchSize() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.batchSize
+}
+
+// metrics returns the counters this connection reports into.
+func (s *ScionBatchConn) metrics() snet.SCIONPacketConnMetrics {
+	return s.pathManager.metrics.SCIONPacketConnMetrics
 }
 
 func (s *ScionBatchConn) ReadBatch(
@@ -347,11 +355,23 @@ func (s *ScionBatchConn) readMessages(
 		(*msgs)[i].Buffers[0] = bufs[i]
 		(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
 	}
-
+	var numMessages int
+	var err error
 	if ipv4PC != nil {
-		return s.readIPv4Messages(msgs, ipv4PC, ipv4RxOffload)
+		numMessages, err = s.readIPv4Messages(msgs, ipv4PC, ipv4RxOffload)
+	} else {
+		numMessages, err = s.readIPv6Messages(msgs, ipv6PC, ipv6RxOffload)
 	}
-	return s.readIPv6Messages(msgs, ipv6PC, ipv6RxOffload)
+	if err == nil {
+		var receivedBytes uint64
+		for i := 0; i < numMessages; i++ {
+			receivedBytes += uint64((*msgs)[i].N)
+		}
+		m := s.metrics()
+		metricsv2.CounterAdd(m.ReadBytes, float64(receivedBytes))
+		metricsv2.CounterAdd(m.ReadPackets, float64(numMessages))
+	}
+	return numMessages, err
 }
 
 func (s *ScionBatchConn) readIPv4Messages(
@@ -368,6 +388,7 @@ func (s *ScionBatchConn) readIPv4Messages(
 
 	numMsgs, err := ipv4PC.ReadBatch(*msgs, 0)
 	if err != nil {
+		metricsv2.CounterInc(s.metrics().UnderlayConnectionErrors)
 		return 0, fmt.Errorf("IPv4 batch read failed: %w", err)
 	}
 	return numMsgs, nil
@@ -387,6 +408,7 @@ func (s *ScionBatchConn) readIPv6Messages(
 
 	numMsgs, err := ipv6PC.ReadBatch(*msgs, 0)
 	if err != nil {
+		metricsv2.CounterInc(s.metrics().UnderlayConnectionErrors)
 		return 0, fmt.Errorf("IPv6 batch read failed: %w", err)
 	}
 	return numMsgs, nil
@@ -403,6 +425,7 @@ func (s *ScionBatchConn) readWithOffload(
 	}
 
 	if _, err := readFunc((*msgs)[readAt:]); err != nil {
+		metricsv2.CounterInc(s.metrics().UnderlayConnectionErrors)
 		return 0, fmt.Errorf("%s batch read failed: %w", protocol, err)
 	}
 
@@ -449,6 +472,7 @@ func (s *ScionBatchConn) processMessage(
 
 	scionPkt.Bytes = msg.Buffers[0][:msg.N]
 	if err := scionPkt.Decode(); err != nil {
+		metricsv2.CounterInc(s.metrics().ParseErrors)
 		s.logger.Verbosef("Failed to decode SCION packet: %v", err)
 		return false
 	}
@@ -477,8 +501,11 @@ func (s *ScionBatchConn) handleSCMPPacket(
 	if _, ok := scionPkt.Payload.(snet.SCMPPayload); ok {
 		if scmpHandler != nil {
 			if err := scmpHandler.Handle(scionPkt); err != nil {
+				// Same as in snet: do not count it as an scmp error.
 				s.logger.Verbosef("SCMP handler error: %v", err)
 			}
+		} else {
+			metricsv2.CounterInc(s.metrics().SCMPErrors)
 		}
 		return true
 	}
@@ -598,9 +625,7 @@ func (s *ScionBatchConn) WriteBatch(
 	var revExtn *slayers.EndToEndExtn
 	if res, ok := scionEp.scionAddr.Path.(*snetpath.Reservation); ok {
 		fwdRes = res
-		if s.pathManager != nil {
-			revExtn = s.pathManager.TakeReverseExtn(scionEp.scionAddr.IA)
-		}
+		revExtn = s.pathManager.TakeReverseExtn(scionEp.scionAddr.IA)
 	}
 
 	sbufs, err := s.prepareSCIONPackets(scionPkts, scionEp, bufs, ua, ipv4PC != nil,
@@ -830,6 +855,13 @@ func (s *ScionBatchConn) sendBatchMessages(
 		if err != nil {
 			return err
 		}
+		bytesSent := uint64(0)
+		for i := start; i < start+n; i++ {
+			bytesSent += uint64(msgs[i].N)
+		}
+		m := s.metrics()
+		metricsv2.CounterAdd(m.WriteBytes, float64(bytesSent))
+		metricsv2.CounterAdd(m.WritePackets, float64(n))
 		start += n
 	}
 	return nil

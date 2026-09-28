@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/daemon"
 	"github.com/scionproto/scion/pkg/daemon/types" // Add this line
@@ -92,6 +94,8 @@ type PathManager struct {
 	// Hummingbird settings
 	humm HummingbirdConfig
 	topo snet.Topology
+
+	metrics Metrics
 }
 
 // NewPathManager wires up a new path manager.  The background refresh only
@@ -148,6 +152,10 @@ func WithPathFilters(filters map[addr.IA]*pathpol.Sequence) PathManagerOption {
 // to reach the marketplaces that are addressed over SCION.
 func WithTopology(topo snet.Topology) PathManagerOption {
 	return func(pm *PathManager) { pm.topo = topo }
+}
+
+func WithMetrics(m Metrics) PathManagerOption {
+	return func(pm *PathManager) { pm.metrics = m }
 }
 
 // Start kicks off the periodic refresh goroutine.  Calling Start multiple
@@ -637,7 +645,7 @@ func (pm *PathManager) buyReservation(
 	// timestamps it was asked for.
 	startsAt := startAt.Truncate(time.Second)
 	stopsAt := startsAt.Add(pm.humm.Duration)
-
+	timerStart := time.Now()
 	rsv, err := marketplace.OneShotReservation(
 		ctx,
 		path,
@@ -658,6 +666,10 @@ func (pm *PathManager) buyReservation(
 			Selected:        selected,
 		},
 	)
+
+	// Observability: note down the time needed to obtain the reservation, with or without error.
+	pm.metrics.ObserveReservationSetup(time.Since(timerStart), err)
+
 	if err != nil {
 		return nil, nil, fmt.Errorf("marketplace reservation: %w", err)
 	}
@@ -975,6 +987,7 @@ func (pm *PathManager) StartAPIServer(defaultPort int, fallbackPorts ...int) err
 	mux := http.NewServeMux()
 	mux.HandleFunc("/paths", pm.handleGetPathsJSON())
 	mux.HandleFunc("/path", pm.handleSetPath())
+	mux.Handle("/metrics", promhttp.Handler())
 
 	pm.httpServer = &http.Server{
 		Handler: mux,

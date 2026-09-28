@@ -33,7 +33,8 @@ func NewMetrics() Metrics {
 		},
 		ReservationSetupDuration: metrics.NewPromGauge(prom.NewGaugeVec("", "",
 			"reservation_setup_duration_seconds",
-			"Total time required to search, buy and redeem assets at the marketplace", nil)),
+			"Total time required to search, buy and redeem assets at the marketplace."+
+				"Timed-out acquisitions will also increment this value", nil)),
 		BytesSent: metrics.NewPromCounter(prom.SafeRegister(
 			prometheus.NewCounterVec(prometheus.CounterOpts{
 				Name: "sent_bytes_total",

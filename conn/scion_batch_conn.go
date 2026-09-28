@@ -841,7 +841,7 @@ func (s *ScionBatchConn) sendBatchMessages(
 			return err
 		}
 		bytesSent := uint64(0)
-		for i := start; i < n; i++ {
+		for i := start; i < start+n; i++ {
 			bytesSent += uint64(msgs[i].N)
 		}
 		s.pathManager.metrics.BytesSent.Add(float64(bytesSent))

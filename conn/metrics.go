@@ -1,9 +1,10 @@
 package conn
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/scionproto/scion/pkg/metrics"
-	"github.com/scionproto/scion/pkg/private/prom"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/scionproto/scion/pkg/snet"
 )
 
@@ -23,10 +24,13 @@ type Metrics struct {
 	// The two are never active at the same time.
 	SCIONPacketConnMetrics snet.SCIONPacketConnMetrics
 
-	// ReservationSetupDuration is observed once per purchase, under labelResult.
-	ReservationSetupDuration metrics.Histogram
+	// reservationSetupDuration is observed once per purchase, under labelResult.
+	// Use ObserveReservationSetup rather accessing the variable directly.
+	reservationSetupDuration *prometheus.HistogramVec
 }
 
+// NewMetrics registers every series this package exports with the default registry.
+// Call it once: promauto registers eagerly and panics on a name that is already taken.
 func NewMetrics() Metrics {
 	return Metrics{
 		SCIONPacketConnMetrics: snet.SCIONPacketConnMetrics{
@@ -50,44 +54,46 @@ func NewMetrics() Metrics {
 			Closes: newCounter("closes_total",
 				"Total number of times the underlay connection was closed"),
 		},
-		ReservationSetupDuration: newReservationHistogram(),
+		reservationSetupDuration: newReservationHistogram(),
 	}
 }
 
-// newCounter registers an unlabelled counter and wraps it for snet.
-func newCounter(name, help string) metrics.Counter {
-	// SafeRegister rather than MustRegister.
-	// Note that it returns the *existing* collector on a clash,
-	// so two names that collide silently become one series: keep them distinct.
-	c := metrics.NewPromCounter(prom.SafeRegister(
-		prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Name:      name,
-			Help:      help,
-		}, nil)).(*prometheus.CounterVec),
-	)
-	// A CounterVec has no children until something writes to it, so a counter that has
-	// not fired yet is missing from /metrics entirely.
-	// Adding zero creates the series and leaves it reading 0.
-	c.Add(0)
-	return c
+// ObserveReservationSetup tells how long one marketplace purchase took.
+//
+// Both ok and error outcomes are timed, under their own label.
+func (m Metrics) ObserveReservationSetup(took time.Duration, err error) {
+	if m.reservationSetupDuration == nil {
+		return
+	}
+	result := resultOK
+	if err != nil {
+		result = resultErr
+	}
+	m.reservationSetupDuration.WithLabelValues(result).Observe(took.Seconds())
+}
+
+// newCounter registers one unlabelled counter.
+func newCounter(name, help string) prometheus.Counter {
+	return promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: metricsNamespace,
+		Name:      name,
+		Help:      help,
+	})
 }
 
 // newReservationHistogram registers the delay of marketplace purchases.
 //
 // A histogram keeps a count, a sum and buckets, none of which a scrape can miss,
 // and its _count child is the number of reservations bought, so it doubles as a counter too.
-func newReservationHistogram() metrics.Histogram {
-	hv := prom.SafeRegister(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+func newReservationHistogram() *prometheus.HistogramVec {
+	hv := promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: metricsNamespace,
 		Name:      "reservation_setup_duration_seconds",
 		Help:      "Time taken to search, buy and redeem assets at the marketplace",
-		Buckets:   prom.DefaultLatencyBuckets,
-	}, []string{labelResult})).(*prometheus.HistogramVec)
-	// Both outcomes exist from the start, for the same reason newCounter adds zero.
-	// It has to be With rather than an Observe, which would file a bogus 0s reservation.
+		Buckets:   prometheus.ExponentialBuckets(0.01, 2, 11), // 10ms to 10.24s.
+	}, []string{labelResult})
 	for _, result := range []string{resultOK, resultErr} {
-		hv.With(prometheus.Labels{labelResult: result})
+		hv.With(prometheus.Labels{labelResult: result}) // Run it with With instead of Observe.
 	}
-	return metrics.NewPromHistogram(hv)
+	return hv
 }

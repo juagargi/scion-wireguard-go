@@ -37,13 +37,14 @@ var (
 
 // ScionBatchConn provides batch send/receive capabilities for SCION packets
 type ScionBatchConn struct {
-	mu          sync.RWMutex
-	conn        *net.UDPConn
-	ipv4PC      *ipv4.PacketConn
-	ipv6PC      *ipv6.PacketConn
-	localIA     addr.IA
-	localAddr   *net.UDPAddr
-	topology    snet.Topology
+	mu        sync.RWMutex
+	conn      *net.UDPConn
+	ipv4PC    *ipv4.PacketConn
+	ipv6PC    *ipv6.PacketConn
+	localIA   addr.IA
+	localAddr *net.UDPAddr
+	topology  snet.Topology
+	// pathManager is never nil, and is dereferenced below without checking.
 	pathManager *PathManager
 	scmpHandler snet.SCMPHandler
 	replyPather snet.ReplyPather
@@ -319,9 +320,6 @@ func (s *ScionBatchConn) BatchSize() int {
 
 // metrics returns the counters this connection reports into.
 func (s *ScionBatchConn) metrics() snet.SCIONPacketConnMetrics {
-	if s.pathManager == nil {
-		return snet.SCIONPacketConnMetrics{}
-	}
 	return s.pathManager.metrics.SCIONPacketConnMetrics
 }
 
@@ -627,9 +625,7 @@ func (s *ScionBatchConn) WriteBatch(
 	var revExtn *slayers.EndToEndExtn
 	if res, ok := scionEp.scionAddr.Path.(*snetpath.Reservation); ok {
 		fwdRes = res
-		if s.pathManager != nil {
-			revExtn = s.pathManager.TakeReverseExtn(scionEp.scionAddr.IA)
-		}
+		revExtn = s.pathManager.TakeReverseExtn(scionEp.scionAddr.IA)
 	}
 
 	sbufs, err := s.prepareSCIONPackets(scionPkts, scionEp, bufs, ua, ipv4PC != nil,

@@ -23,6 +23,7 @@ import (
 	"github.com/scionproto/scion/pkg/daemon"
 	"github.com/scionproto/scion/pkg/daemon/types" // Add this line
 	"github.com/scionproto/scion/pkg/hummingbird/marketplace"
+	"github.com/scionproto/scion/pkg/metrics"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/snet"
 	snetpath "github.com/scionproto/scion/pkg/snet/path"
@@ -547,8 +548,17 @@ func (pm *PathManager) buyReservation(
 		marketplaceCombineAssets,
 		marketplacePurchaseRetries,
 	)
-	timeDiff := time.Since(timerStart)
-	pm.metrics.ReservationSetupDuration.Set(timeDiff.Seconds())
+
+	// Observability: note down the time needed to obtain the reservation, with or without error.
+	result := resultOK
+	if err != nil {
+		result = resultErr
+	}
+	metrics.HistogramObserve(
+		metrics.HistogramWith(pm.metrics.ReservationSetupDuration, labelResult, result),
+		time.Since(timerStart).Seconds(),
+	)
+
 	if err != nil {
 		return nil, nil, fmt.Errorf("marketplace reservation: %w", err)
 	}

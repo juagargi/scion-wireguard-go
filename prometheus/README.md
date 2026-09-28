@@ -28,26 +28,30 @@ also just fail.
 
 ## The metrics
 
+Every series wireguard-go exports is prefixed `wireguard_`,
+which is what tells it apart from SCION's own `grpc_client_*` and the Go runtime
+collectors that share the same `/metrics` endpoint.
+
 | series | meaning |
 | --- | --- |
-| `sent_bytes_total` | bytes written to the underlay, SCION and UDP headers included |
-| `received_bytes_total` | bytes read from the underlay, likewise |
-| `sent_packets_total` | packets written to the underlay |
-| `received_packets_total` | packets read from the underlay, whatever they turn out to hold |
-| `parse_errors_total` | received packets that did not decode as SCION |
-| `scmp_errors_total` | received SCMP packets that no handler was installed for |
-| `underlay_connection_errors_total` | failed reads from the underlay socket |
-| `closes_total` | times the underlay socket was closed |
-| `reservation_setup_duration_seconds` | how long the last Hummingbird reservation took to search, buy and redeem |
+| `wireguard_sent_bytes_total` | bytes written to the underlay, SCION and UDP headers included |
+| `wireguard_received_bytes_total` | bytes read from the underlay, likewise |
+| `wireguard_sent_packets_total` | packets written to the underlay |
+| `wireguard_received_packets_total` | packets read from the underlay, whatever they turn out to hold |
+| `wireguard_parse_errors_total` | received packets that did not decode as SCION |
+| `wireguard_scmp_errors_total` | received SCMP packets that no handler was installed for |
+| `wireguard_underlay_connection_errors_total` | failed reads from the underlay socket |
+| `wireguard_closes_total` | times the underlay socket was closed |
+| `wireguard_reservation_setup_duration_seconds` | histogram of how long a Hummingbird reservation took to search, buy and redeem |
 
-Everything but the reservation gauge comes from `snet.SCIONPacketConnMetrics`.
+Everything but the reservation histogram comes from `snet.SCIONPacketConnMetrics`.
 The counters keep the `isd_as` and `role` labels from `prometheus.yml`,
 so the two sides of the tunnel share one job and are told apart in the query:
 ```
-rate(sent_bytes_total{role="source"}[1m])
+rate(wireguard_sent_bytes_total{role="source"}[1m])
 ```
 Mind the range. `scrape_interval` is 10s, and a range that spans a single sample yields nothing at all,
-so `increase(sent_bytes_total[10s])` is always empty.
+so `increase(wireguard_sent_bytes_total[10s])` is always empty.
 Use a window of a minute or more, or `$__rate_interval` if you point a Grafana at this.
 
 

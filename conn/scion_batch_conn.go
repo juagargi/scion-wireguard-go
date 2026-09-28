@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/scionproto/scion/pkg/addr"
+	metricsv2 "github.com/scionproto/scion/pkg/metrics/v2"
 	"github.com/scionproto/scion/pkg/private/common"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/snet"
@@ -286,6 +287,7 @@ func (s *ScionBatchConn) Close() error {
 	}
 	s.closed = true
 
+	metricsv2.CounterInc(s.metrics().Closes)
 	return s.closeConnections()
 }
 
@@ -313,6 +315,14 @@ func (s *ScionBatchConn) BatchSize() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.batchSize
+}
+
+// metrics returns the counters this connection reports into.
+func (s *ScionBatchConn) metrics() snet.SCIONPacketConnMetrics {
+	if s.pathManager == nil {
+		return snet.SCIONPacketConnMetrics{}
+	}
+	return s.pathManager.metrics.SCIONPacketConnMetrics
 }
 
 func (s *ScionBatchConn) ReadBatch(
@@ -359,7 +369,9 @@ func (s *ScionBatchConn) readMessages(
 		for i := 0; i < numMessages; i++ {
 			receivedBytes += uint64((*msgs)[i].N)
 		}
-		s.pathManager.metrics.BytesReceived.Add(float64(receivedBytes))
+		m := s.metrics()
+		metricsv2.CounterAdd(m.ReadBytes, float64(receivedBytes))
+		metricsv2.CounterAdd(m.ReadPackets, float64(numMessages))
 	}
 	return numMessages, err
 }
@@ -378,6 +390,7 @@ func (s *ScionBatchConn) readIPv4Messages(
 
 	numMsgs, err := ipv4PC.ReadBatch(*msgs, 0)
 	if err != nil {
+		metricsv2.CounterInc(s.metrics().UnderlayConnectionErrors)
 		return 0, fmt.Errorf("IPv4 batch read failed: %w", err)
 	}
 	return numMsgs, nil
@@ -397,6 +410,7 @@ func (s *ScionBatchConn) readIPv6Messages(
 
 	numMsgs, err := ipv6PC.ReadBatch(*msgs, 0)
 	if err != nil {
+		metricsv2.CounterInc(s.metrics().UnderlayConnectionErrors)
 		return 0, fmt.Errorf("IPv6 batch read failed: %w", err)
 	}
 	return numMsgs, nil
@@ -413,6 +427,7 @@ func (s *ScionBatchConn) readWithOffload(
 	}
 
 	if _, err := readFunc((*msgs)[readAt:]); err != nil {
+		metricsv2.CounterInc(s.metrics().UnderlayConnectionErrors)
 		return 0, fmt.Errorf("%s batch read failed: %w", protocol, err)
 	}
 
@@ -459,6 +474,7 @@ func (s *ScionBatchConn) processMessage(
 
 	scionPkt.Bytes = msg.Buffers[0][:msg.N]
 	if err := scionPkt.Decode(); err != nil {
+		metricsv2.CounterInc(s.metrics().ParseErrors)
 		s.logger.Verbosef("Failed to decode SCION packet: %v", err)
 		return false
 	}
@@ -487,8 +503,11 @@ func (s *ScionBatchConn) handleSCMPPacket(
 	if _, ok := scionPkt.Payload.(snet.SCMPPayload); ok {
 		if scmpHandler != nil {
 			if err := scmpHandler.Handle(scionPkt); err != nil {
+				// Same as in snet: do not count it as an scmp error.
 				s.logger.Verbosef("SCMP handler error: %v", err)
 			}
+		} else {
+			metricsv2.CounterInc(s.metrics().SCMPErrors)
 		}
 		return true
 	}
@@ -844,7 +863,9 @@ func (s *ScionBatchConn) sendBatchMessages(
 		for i := start; i < start+n; i++ {
 			bytesSent += uint64(msgs[i].N)
 		}
-		s.pathManager.metrics.BytesSent.Add(float64(bytesSent))
+		m := s.metrics()
+		metricsv2.CounterAdd(m.WriteBytes, float64(bytesSent))
+		metricsv2.CounterAdd(m.WritePackets, float64(n))
 		start += n
 	}
 	return nil

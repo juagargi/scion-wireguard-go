@@ -1,0 +1,14 @@
+# Scrape config for the tiny topology only, see README.md
+global:
+  # A range that spans a single sample yields no result, so keep a decently long interval here.
+  scrape_interval: 10s
+
+scrape_configs:
+  - job_name: "wireguard"
+    static_configs:
+      # 1-ff00:0:111, the sending side (--source-ia of tests/scion-integration.py).
+      - targets: ["172.20.0.29:28015"]
+        labels: {isd_as: "1-ff00:0:111", role: "source"}
+      # 1-ff00:0:112, the receiving side (--dest-ia). Reached over IPv6 in tiny.topo.
+      - targets: ["[fd00:f00d:cafe::7f00:15]:28015"]
+        labels: {isd_as: "1-ff00:0:112", role: "dest"}

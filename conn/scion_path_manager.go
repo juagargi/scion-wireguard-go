@@ -449,6 +449,10 @@ func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA)
 		if !expiry.After(time.Now()) {
 			pm.log.Errorf("Hummingbird reservation bought for %s expired at %s before being used",
 				dest, expiry)
+			if pm.dropExpiredReservation(dest) {
+				pm.log.Errorf("Hummingbird reservation for %s expired without a successful renewal",
+					dest)
+			}
 			requestAt = time.Now().Add(renewalRetryDelay)
 			handoverAt = requestAt
 			startAt = requestAt.Add(pm.humm.StartOffset)

@@ -45,6 +45,7 @@ func TestHummingbirdConfigValidate(t *testing.T) {
 		"no token":        func(c *HummingbirdConfig) { c.JWT = "" },
 		"no bandwidth":    func(c *HummingbirdConfig) { c.BandwidthKbps = 0 },
 		"no duration":     func(c *HummingbirdConfig) { c.Duration = 0 },
+		"lease too long":  func(c *HummingbirdConfig) { c.Duration = maxReservationDuration + time.Second },
 		"overlap > ahead": func(c *HummingbirdConfig) { c.ReservationOverlap = c.RenewalAhead + time.Second },
 		"ahead > lease":   func(c *HummingbirdConfig) { c.RenewalAhead = c.Duration },
 		"future start":    func(c *HummingbirdConfig) { c.StartOffset = time.Second },

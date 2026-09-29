@@ -2,6 +2,7 @@ package conn
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/scionproto/scion/pkg/hummingbird/marketplace"
@@ -30,6 +31,10 @@ const (
 	defaultReservationOverlap = 15 * time.Second
 	defaultStartOffset        = -1 * time.Second
 )
+
+// maxReservationDuration is the longest reservation a flyover can describe,
+// since it carries the duration as a 16-bit number of seconds.
+const maxReservationDuration = math.MaxUint16 * time.Second
 
 // HummingbirdConfig holds everything needed to buy Hummingbird reservations from
 // the marketplaces of a path, and to keep them fresh.
@@ -97,6 +102,10 @@ func (c HummingbirdConfig) Validate() error {
 	}
 	if c.Duration <= 0 {
 		return fmt.Errorf("reservation duration must be positive, is %s", c.Duration)
+	}
+	if c.Duration > maxReservationDuration {
+		return fmt.Errorf("reservation duration must not exceed %s, is %s",
+			maxReservationDuration, c.Duration)
 	}
 	if c.RenewalAhead < 0 {
 		return fmt.Errorf("renewal ahead must not be negative, is %s", c.RenewalAhead)

@@ -442,7 +442,8 @@ func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA)
 			continue
 		}
 
-		// The marketplace may have sold a window shorter than the one asked for,
+		// The purchase may have taken longer than the reservation lasts
+		// (the time window is fixed before the retries start),
 		// so never hand traffic over to a reservation that is already dead.
 		expiry := rsv.Expiry()
 		if !expiry.After(time.Now()) {

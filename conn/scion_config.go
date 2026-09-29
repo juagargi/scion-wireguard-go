@@ -175,9 +175,6 @@ func LoadHummingbirdConfigFromEnv() (HummingbirdConfig, error) {
 // DefaultHummingbirdConfig returns the disabled Hummingbird configuration.
 func DefaultHummingbirdConfig() HummingbirdConfig {
 	return HummingbirdConfig{
-		// The marketplaces of a local topology serve a self-signed certificate,
-		// which no verification can accept.
-		Insecure:           true,
 		MaxPrice:           math.MaxUint64,
 		RenewalAhead:       defaultRenewalAhead,
 		ReservationOverlap: defaultReservationOverlap,

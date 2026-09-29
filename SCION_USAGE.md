@@ -43,8 +43,8 @@ so only the JWT authenticating this client is configured.
 * `HUMMINGBIRD_START_OFFSET`: Negative offset applied to the start time a reservation is
   bought with, to tolerate border routers whose clock lags ours (default: `-1s`)
 * `HUMMINGBIRD_MAX_PRICE`: Most this client will pay for one reservation (default: unlimited)
-* `HUMMINGBIRD_MARKETPLACE_INSECURE=0`: Validate the marketplace server certificate.
-  It defaults to `1`, since the marketplaces of a local topology serve self-signed ones.
+* `HUMMINGBIRD_MARKETPLACE_INSECURE=1`: Do not validate the marketplace server certificate,
+  e.g. for the marketplaces of a local topology, which serve self-signed ones (default: `0`)
 
 Both reservations of a handover are valid at the same time, but only one of them
 ever carries traffic: the replacement is bought `RENEWAL_AHEAD` before the expiry

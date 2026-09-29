@@ -46,10 +46,10 @@ func (e *PacketValidationError) Error() string {
 }
 
 // ensureCapacity validates that the buffer has sufficient capacity
-func ensureCapacity(buf []byte, needed int, context string) error {
+func ensureCapacity(buf []byte, needed int) error {
 	if needed > cap(buf) {
-		return fmt.Errorf("%s: insufficient buffer capacity: need %d bytes, have %d",
-			context, needed, cap(buf))
+		return fmt.Errorf("insufficient buffer capacity: need %d bytes, have %d",
+			needed, cap(buf))
 	}
 	return nil
 }
@@ -166,8 +166,8 @@ func Serialize(p *snet.Packet, fwdRes *snetpath.Reservation, revExtn *slayers.En
 	totalLen := scHdrLen + e2eLen + udpLen
 
 	// Ensure buffer capacity
-	if err := ensureCapacity(p.Bytes, totalLen, "packet serialization"); err != nil {
-		return err
+	if err := ensureCapacity(p.Bytes, totalLen); err != nil {
+		return fmt.Errorf("packet serialization: %s", err)
 	}
 
 	p.Bytes = p.Bytes[:totalLen]
@@ -312,8 +312,8 @@ func SerializeBatch(
 		totalLen := scHdrLen + e2eLen + currentUdpLen
 
 		// Ensure buffer capacity
-		if err := ensureCapacity(p.Bytes, totalLen, fmt.Sprintf("packet %d", i)); err != nil {
-			return err
+		if err := ensureCapacity(p.Bytes, totalLen); err != nil {
+			return fmt.Errorf("packet %d: %s", i, err)
 		}
 		p.Bytes = p.Bytes[:totalLen]
 

@@ -45,6 +45,12 @@ so only the JWT authenticating this client is configured.
 * `HUMMINGBIRD_MAX_PRICE`: Most this client will pay for one reservation (default: unlimited)
 * `HUMMINGBIRD_MARKETPLACE_INSECURE=1`: Do not validate the marketplace server certificate,
   e.g. for the marketplaces of a local topology, which serve self-signed ones (default: `0`)
+* `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`: Hop predicates, with the syntax of
+  `scion showpaths --sequence`, that the path to a marketplace in another AS must match,
+  e.g. `"1-ff00:0:110#3 0*"`. The first matching path of the daemon is used, refreshing
+  the daemon's paths once if none matches; without any match the purchase fails.
+  Use it to keep the marketplace traffic off the reserved interfaces (default: the
+  daemon's first path)
 
 Both reservations of a handover are valid at the same time, but only one of them
 ever carries traffic: the replacement is bought `RENEWAL_AHEAD` before the expiry

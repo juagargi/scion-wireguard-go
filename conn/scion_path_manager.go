@@ -531,7 +531,7 @@ func (pm *PathManager) buyReservation(
 		ctx,
 		path,
 		pm.humm.JWT,
-		daemon.Querier{Connector: pm.d, IA: pm.localIA},
+		pm.humm.marketplaceQuerier(pm.d, pm.localIA),
 		pm.topo,
 		pm.humm.Insecure,
 		marketplace.ReservationRequest{

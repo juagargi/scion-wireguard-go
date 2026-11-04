@@ -1,8 +1,17 @@
 package conn
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/daemon"
+	"github.com/scionproto/scion/pkg/daemon/types"
+	"github.com/scionproto/scion/pkg/segment/iface"
+	"github.com/scionproto/scion/pkg/snet"
+	snetpath "github.com/scionproto/scion/pkg/snet/path"
+	"github.com/scionproto/scion/private/path/pathpol"
 )
 
 func TestRenewalSchedule(t *testing.T) {
@@ -55,5 +64,86 @@ func TestHummingbirdConfigValidate(t *testing.T) {
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+func TestLoadHummingbirdPathToMarketplaceFilter(t *testing.T) {
+	t.Setenv(EnvHummingbirdBandwidth, "1mbps")
+	t.Setenv(EnvMarketplaceJWT, "token")
+	t.Setenv(EnvHummingbirdDuration, "60s")
+
+	cfg, err := LoadHummingbirdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("loading without filter: %v", err)
+	}
+	if cfg.PathToMarketplace != nil {
+		t.Errorf("no filter given, got %q", cfg.PathToMarketplace)
+	}
+
+	t.Setenv(EnvHummingbirdPathToMarketplaceFilter, "1-ff00:0:110#2 0*")
+	cfg, err = LoadHummingbirdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("loading with filter: %v", err)
+	}
+	if cfg.PathToMarketplace == nil || cfg.PathToMarketplace.String() != "1-ff00:0:110#2 0*" {
+		t.Errorf("filter not loaded, got %v", cfg.PathToMarketplace)
+	}
+
+	t.Setenv(EnvHummingbirdPathToMarketplaceFilter, "not a sequence ((")
+	if _, err := LoadHummingbirdConfigFromEnv(); err == nil {
+		t.Errorf("malformed filter accepted")
+	}
+}
+
+// fakeDaemon answers path requests with paths, and the refreshed ones with refreshed.
+type fakeDaemon struct {
+	daemon.Connector
+	paths, refreshed []snet.Path
+	refreshes        int
+}
+
+func (d *fakeDaemon) Paths(_ context.Context, _, _ addr.IA, f types.PathReqFlags) ([]snet.Path, error) {
+	if f.Refresh {
+		d.refreshes++
+		return d.refreshed, nil
+	}
+	return d.paths, nil
+}
+
+// testPath is a path from 1-ff00:0:110 leaving through egress to 1-ff00:0:111.
+func testPath(egress iface.ID) snet.Path {
+	src, dst := addr.MustParseIA("1-ff00:0:110"), addr.MustParseIA("1-ff00:0:111")
+	return snetpath.Path{Src: src, Dst: dst, Meta: snet.PathMetadata{
+		Interfaces: []snet.PathInterface{{IA: src, ID: egress}, {IA: dst, ID: 1}},
+	}}
+}
+
+func TestSequenceQuerier(t *testing.T) {
+	local, dst := addr.MustParseIA("1-ff00:0:110"), addr.MustParseIA("1-ff00:0:111")
+	sequence, err := pathpol.NewSequence("1-ff00:0:110#3 0*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	egress := func(p snet.Path) iface.ID { return p.Metadata().Interfaces[0].ID }
+
+	d := &fakeDaemon{paths: []snet.Path{testPath(2), testPath(3), testPath(3)}}
+	paths, err := sequenceQuerier{d: d, local: local, sequence: sequence}.Query(context.Background(), dst)
+	if err != nil {
+		t.Fatalf("matching path not found: %v", err)
+	}
+	if len(paths) != 1 || egress(paths[0]) != 3 || d.refreshes != 0 {
+		t.Errorf("want the first matching path without refreshing, got %v after %d refreshes",
+			paths, d.refreshes)
+	}
+
+	d = &fakeDaemon{paths: []snet.Path{testPath(2)}, refreshed: []snet.Path{testPath(2), testPath(3)}}
+	paths, err = sequenceQuerier{d: d, local: local, sequence: sequence}.Query(context.Background(), dst)
+	if err != nil || len(paths) != 1 || egress(paths[0]) != 3 {
+		t.Errorf("want the matching path after refreshing, got %v, %v", paths, err)
+	}
+
+	d = &fakeDaemon{paths: []snet.Path{testPath(2)}, refreshed: []snet.Path{testPath(2)}}
+	if _, err = (sequenceQuerier{d: d, local: local, sequence: sequence}).Query(context.Background(), dst); err == nil {
+		t.Errorf("no path matches, yet no error")
 	}
 }

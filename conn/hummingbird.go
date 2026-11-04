@@ -1,11 +1,17 @@
 package conn
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
 
+	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/daemon"
+	"github.com/scionproto/scion/pkg/daemon/types"
 	"github.com/scionproto/scion/pkg/hummingbird/marketplace"
+	"github.com/scionproto/scion/pkg/snet"
+	"github.com/scionproto/scion/private/path/pathpol"
 )
 
 // Fixed marketplace purchase parameters.
@@ -51,6 +57,10 @@ type HummingbirdConfig struct {
 
 	// Insecure disables the validation of the marketplace server certificate.
 	Insecure bool
+
+	// PathToMarketplace restricts the path to a marketplace in another AS to those
+	// matching the sequence. Nil uses the daemon's first path.
+	PathToMarketplace *pathpol.Sequence
 
 	// MaxPrice is the most this client is willing to pay for one reservation.
 	MaxPrice uint64
@@ -125,6 +135,39 @@ func (c HummingbirdConfig) Validate() error {
 		return fmt.Errorf("start offset must not be positive, is %s", c.StartOffset)
 	}
 	return nil
+}
+
+// marketplaceQuerier returns the querier the marketplace client looks up its path with:
+// the daemon's paths as they are, or only the first one matching cfg.PathToMarketplace.
+func (c HummingbirdConfig) marketplaceQuerier(d daemon.Connector, local addr.IA) snet.PathQuerier {
+	if c.PathToMarketplace == nil {
+		return daemon.Querier{Connector: d, IA: local}
+	}
+	return sequenceQuerier{d: d, local: local, sequence: c.PathToMarketplace}
+}
+
+// sequenceQuerier returns only the first path of the daemon matching the sequence.
+// Without a match it asks the daemon once more, forcing it to refresh its paths.
+type sequenceQuerier struct {
+	d        daemon.Connector
+	local    addr.IA
+	sequence *pathpol.Sequence
+}
+
+func (q sequenceQuerier) Query(ctx context.Context, dst addr.IA) ([]snet.Path, error) {
+	var paths []snet.Path
+	for _, refresh := range []bool{false, true} {
+		var err error
+		paths, err = q.d.Paths(ctx, dst, q.local, types.PathReqFlags{Refresh: refresh})
+		if err != nil {
+			return nil, fmt.Errorf("querying paths from %s to %s: %w", q.local, dst, err)
+		}
+		if matching := q.sequence.Eval(paths); len(matching) > 0 {
+			return matching[:1], nil
+		}
+	}
+	return nil, fmt.Errorf("none of the %d paths from %s to %s matches the sequence %q",
+		len(paths), q.local, dst, q.sequence.String())
 }
 
 // renewalSchedule spreads the handover of a reservation expiring at expiry over

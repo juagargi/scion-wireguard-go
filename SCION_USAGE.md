@@ -76,12 +76,18 @@ cd <scion-dir>
   Hummingbird bandwidths, `--hummingbird` to buy reservations (off by default), and
   more; see `--help`.
 * `tests/scion-integration.py`: checks that the tiny topology is running in
-  `--scion-dir`, then runs `scion-end2end.py` once per selected test, e.g.
-  `--test-smoke` (best effort, no Hummingbird), `--test-hummingbird` (a transfer
-  spanning several reservation renewals), `--test-path-filter` (traffic and
-  reservations restricted by a `scion_path_filter`), `--test-marketplace-filter` (reservations
-  bought over a path to the marketplace restricted by
-  `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`), or `--test-all`.
+  `--scion-dir`, then runs `scion-end2end.py` once per selected test, or all of them
+  with `--test-all` (about 70 s):
+  * `--test-smoke`: a small transfer over best-effort paths, without Hummingbird.
+  * `--test-no-peer-path`: a `scion_path_filter` excluding every path to the peer
+    makes the sender reject it.
+  * `--test-no-marketplace-path`: a `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`
+    excluding every path to the marketplace makes every purchase fail.
+  * `--test-hummingbird`: a small transfer on a reservation, bought without filters
+    from the marketplace in the sender's own AS.
+  * `--test-filters`: both filters at once, from the AS without the marketplace; checks
+    that the peer and the marketplace were reached over the filtered paths, and that
+    the reservation was renewed twice, each time over a filtered marketplace path.
 
 ```bash
 ./tests/scion-integration.py --scion-dir <scion-dir> --test-all

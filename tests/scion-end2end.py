@@ -21,6 +21,10 @@ It then
   5. pushes the file through the tunnel with ``rsync``,
   6. waits for the transfer to finish and compares the md5 sums of both ends.
 
+With --expect it instead checks that the run fails in the way asked for, e.g. that a
+path filter excluding every path to the peer keeps the tunnel from being set up, and
+stops there, before any transfer.
+
 Everything the test creates (the tunnel devices, the daemons and the payload files)
 is removed again on the way out, including after a failure or a Ctrl-C.
 
@@ -113,6 +117,10 @@ DEFAULT_MARKETPLACE_PASSWORD = "1234"
 
 class TestFailure(RuntimeError):
     """A condition that makes the integration test fail or impossible to run."""
+
+
+class ExpectedOutcome(Exception):
+    """The failure --expect asked for happened, so the run ends there and passes."""
 
 
 # --------------------------------------------------------------------------------------
@@ -611,6 +619,97 @@ def check_marketplace_path(log: Path) -> None:
     print(f"    {found.group(0).strip()}")
 
 
+# What the sender logs when no path to the marketplace matches its filter.
+MARKETPLACE_UNREACHABLE = re.compile(
+    r"Buying Hummingbird reservation for .* failed.*none of the \d+ paths .* matches the "
+    r"sequence.*"
+)
+
+
+def expect_peer_rejected(
+    topology: Topology,
+    source: Endpoint,
+    private_key: str,
+    peer_public_key: str,
+    dest: Endpoint,
+    log: Path,
+) -> None:
+    """Pass if the sender refuses the peer because no path to it matches --path-filter."""
+    try:
+        configure_peer(topology, source, private_key, peer_public_key, dest)
+    except TestFailure as failure:
+        if "rejected with errno" not in str(failure):
+            raise
+    else:
+        raise TestFailure(
+            f"the sender accepted a peer in {dest.ia} although --path-filter excludes "
+            f"every path there"
+        )
+    matches = [
+        found for found in PATH_FILTER.finditer(log.read_text(errors="replace"))
+        if found.group(1) == dest.ia
+    ]
+    if not matches or matches[-1].group(2) != "0":
+        raise TestFailure(
+            f"the sender rejected the peer, but not because no path to {dest.ia} matches "
+            f"the filter; see {log}"
+        )
+    print(f"    {matches[-1].group(0).strip()}")
+    raise ExpectedOutcome(
+        f"the sender rejected the peer in {dest.ia}, to which no path matches the filter."
+    )
+
+
+def expect_marketplace_unreachable(log: Path, timeout: float) -> None:
+    """Pass if the sender cannot buy, since no path to the marketplace matches its filter."""
+    deadline = time.monotonic() + timeout
+    while True:
+        text = log.read_text(errors="replace")
+        if RESERVATION_IN_USE.search(text):
+            raise TestFailure(
+                "the sender got a reservation although --path-to-marketplace-filter "
+                "excludes every path to the marketplace"
+            )
+        found = MARKETPLACE_UNREACHABLE.search(text)
+        if found:
+            print(f"    {found.group(0).strip()[:160]}...")
+            raise ExpectedOutcome(
+                "the sender bought no reservation, since no path to the marketplace "
+                "matches the filter."
+            )
+        if time.monotonic() >= deadline:
+            raise TestFailure(
+                f"the sender did not report within {timeout:.0f}s that no path to the "
+                f"marketplace matches the filter; see {log}"
+            )
+        time.sleep(0.5)
+
+
+def check_handovers(log: Path, minimum: int) -> None:
+    """Fail unless the traffic moved to a new reservation at least minimum times."""
+    in_use = RESERVATION_IN_USE.findall(log.read_text(errors="replace"))
+    handovers = max(len(in_use) - 1, 0)
+    if handovers < minimum:
+        raise TestFailure(
+            f"the traffic moved to a new reservation {handovers} times, expected at least "
+            f"{minimum}; lengthen the transfer or shorten --duration"
+        )
+    print(f"    {handovers} handovers to a renewed reservation")
+
+
+def check_renewals_filtered(log: Path) -> None:
+    """Fail unless every reservation used was bought over a filtered marketplace path."""
+    text = log.read_text(errors="replace")
+    lookups = len(MARKETPLACE_PATH.findall(text))
+    in_use = len(RESERVATION_IN_USE.findall(text))
+    if lookups < in_use:
+        raise TestFailure(
+            f"{in_use} reservations were used, but the path to the marketplace was "
+            f"selected through the filter only {lookups} times"
+        )
+    print(f"    {lookups} filtered paths to the marketplace for {in_use} reservations used")
+
+
 def marketplace_website(topology: Topology) -> str:
     """The registration web app of the marketplace the generated topology advertises."""
     websites: set[str] = set()
@@ -1051,6 +1150,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="seconds to wait for the first Hummingbird reservation to carry traffic",
     )
     parser.add_argument(
+        "--min-handovers",
+        type=int,
+        default=0,
+        help="fail unless the traffic moved to a renewed reservation at least this many "
+        "times during the run (default: 0)",
+    )
+    parser.add_argument(
+        "--expect",
+        choices=["peer-unreachable", "marketplace-unreachable"],
+        default=None,
+        help="pass only if the run fails this way, and stop there without a transfer: "
+        "peer-unreachable when --path-filter excludes every path to the receiver, "
+        "marketplace-unreachable when --path-to-marketplace-filter excludes every path "
+        "to the marketplace",
+    )
+    parser.add_argument(
         "--transfer-timeout",
         type=float,
         default=7200,
@@ -1122,13 +1237,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.path_to_marketplace_filter:
         raise TestFailure("--path-to-marketplace-filter needs --hummingbird")
 
+    if args.expect == "peer-unreachable" and not args.path_filter:
+        parser.error("--expect=peer-unreachable needs --path-filter")
+    if args.expect == "marketplace-unreachable" and not (
+        args.hummingbird and args.path_to_marketplace_filter
+    ):
+        parser.error(
+            "--expect=marketplace-unreachable needs --hummingbird and "
+            "--path-to-marketplace-filter"
+        )
+
+    outcome = "the file arrived unchanged through the SCION WireGuard tunnel."
     processes: list[subprocess.Popen] = []
     try:
-        print(f"== creating a {args.size} MiB payload in {source.service}")
-        create_payload(topology, source, args.size)
-        source_md5 = md5(topology, source, f"{SOURCE_DIR}/{PAYLOAD}")
-        source_size = size_of(topology, source, f"{SOURCE_DIR}/{PAYLOAD}")
-        print(f"    {source_size} bytes, md5 {source_md5}")
+        if not args.expect:
+            print(f"== creating a {args.size} MiB payload in {source.service}")
+            create_payload(topology, source, args.size)
+            source_md5 = md5(topology, source, f"{SOURCE_DIR}/{PAYLOAD}")
+            source_size = size_of(topology, source, f"{SOURCE_DIR}/{PAYLOAD}")
+            print(f"    {source_size} bytes, md5 {source_md5}")
 
         print("== starting both WireGuard instances")
         for endpoint in (source, dest):
@@ -1144,6 +1271,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.path_filter:
             # Before the peer, so that not even the first path to it ignores the filter.
             set_path_filter(topology, source, dest, args.path_filter)
+        if args.expect == "peer-unreachable":
+            print("== checking that the sender refuses the peer it has no path to")
+            expect_peer_rejected(
+                topology, source, source_private, dest_public, dest,
+                wireguard_log(log_dir, source),
+            )
         configure_peer(topology, source, source_private, dest_public, dest)
         configure_peer(topology, dest, dest_private, source_public, source)
 
@@ -1152,6 +1285,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.path_filter:
             print("== checking that the sender filtered its paths to the receiver")
             check_path_filter(wireguard_log(log_dir, source), dest)
+
+        if args.expect == "marketplace-unreachable":
+            print("== checking that the sender cannot reach the marketplace")
+            expect_marketplace_unreachable(
+                wireguard_log(log_dir, source), args.reservation_timeout
+            )
 
         if hummingbird is not None:
             print("== checking that the traffic really rides on a reservation")
@@ -1193,6 +1332,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if dest_md5 != source_md5:
             raise TestFailure(f"md5 mismatch: source {source_md5}, destination {dest_md5}")
         print(f"    {dest_size} bytes, md5 {dest_md5} — identical")
+
+        if args.min_handovers:
+            print("== checking that the reservation was renewed along the way")
+            check_handovers(wireguard_log(log_dir, source), args.min_handovers)
+            if args.path_to_marketplace_filter:
+                check_renewals_filtered(wireguard_log(log_dir, source))
+    except ExpectedOutcome as expected:
+        outcome = str(expected)
     finally:
         if args.keep:
             print(f"== leaving the tunnel and the payload in place (--keep); logs in {log_dir}")
@@ -1218,7 +1365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             remove_payload(topology, source, SOURCE_DIR)
             remove_payload(topology, dest, DEST_DIR)
 
-    print("\nPASS: the file arrived unchanged through the SCION WireGuard tunnel.")
+    print(f"\nPASS: {outcome}")
     return 0
 
 

@@ -49,44 +49,50 @@ class Case:
 TESTS: dict[str, Case] = {
     "smoke": Case(
         help="a small transfer over best-effort SCION paths, without Hummingbird",
-        args=["--size", "100M"],
+        args=["--size", "10M"],
     ),
-    "hummingbird": Case(
-        # Short reservations hand over about every 11 s (the 20 s lifetime minus the 8 s
-        # overlap and the 1 s start offset), and at the default 80 Mbps 256 MiB take
-        # about 27 s, which spans around three handovers. The 12 s ahead covers the 10 s
-        # purchase timeout of wireguard-go.
-        help="a transfer on Hummingbird reservations that outlives several of them",
-        args=[
-            "--hummingbird",
-            "--size", "256M",
-            "--duration", "20s",
-            "--renewal-ahead", "12s",
-            "--overlap", "8s",
-        ],
+    "no-peer-path": Case(
+        help="a path filter that excludes every path to the peer keeps it from being set up",
+        args=["--path-filter", "1-ff00:0:111#7 0*", "--expect", "peer-unreachable"],
     ),
-    "path-filter": Case(
-        # The tiny topology has a single path between any two ASes; the filter names
-        # every hop of the one from 1-ff00:0:111 to 1-ff00:0:112, through the core AS.
-        help="traffic and reservations restricted to the paths matching a "
-        "scion_path_filter set through the UAPI",
-        args=[
-            "--hummingbird",
-            "--size", "100M",
-            "--path-filter", "1-ff00:0:111#41 1-ff00:0:110#1,2 1-ff00:0:112#1",
-        ],
-    ),
-    "marketplace-filter": Case(
-        # The marketplace of the tiny topology runs in 1-ff00:0:111, so the sender is
-        # 1-ff00:0:112, whose only path there goes through the core AS. The filter
-        # names every hop of that path.
-        help="reservations bought over a path to the marketplace restricted by "
-        "HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER",
+    "no-marketplace-path": Case(
+        # The marketplace of the tiny topology runs in 1-ff00:0:111, so only a sender
+        # in another AS needs a path to it.
+        help="a marketplace filter that excludes every path to the marketplace keeps "
+        "the sender from buying reservations",
         args=[
             "--hummingbird",
             "--source-ia", "1-ff00:0:112",
             "--dest-ia", "1-ff00:0:111",
-            "--size", "100M",
+            "--path-to-marketplace-filter", "1-ff00:0:112#7 0*",
+            "--expect", "marketplace-unreachable",
+        ],
+    ),
+    "hummingbird": Case(
+        # The sender shares its AS with the marketplace, which it reaches without a path.
+        help="a small transfer on a Hummingbird reservation bought without any filter",
+        args=["--hummingbird", "--size", "10M"],
+    ),
+    "filters": Case(
+        # From 1-ff00:0:112 the marketplace in 1-ff00:0:111 is remote, so both filters
+        # apply: each names every hop of the only path through the core AS.
+        # Short reservations hand over about every 11 s (the 20 s lifetime minus the
+        # 8 s overlap and the 1 s start offset). At the default 80 Mbps 224 MiB take
+        # about 23 s, enough for two handovers, each of them a purchase that has to
+        # find its path to the marketplace through the filter again. The 12 s ahead
+        # covers the 10 s purchase timeout of wireguard-go.
+        help="traffic, reservations and their renewals on the paths that "
+        "scion_path_filter and HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER allow",
+        args=[
+            "--hummingbird",
+            "--source-ia", "1-ff00:0:112",
+            "--dest-ia", "1-ff00:0:111",
+            "--size", "224M",
+            "--duration", "20s",
+            "--renewal-ahead", "12s",
+            "--overlap", "8s",
+            "--min-handovers", "2",
+            "--path-filter", "1-ff00:0:112#1 1-ff00:0:110#2,1 1-ff00:0:111#41",
             "--path-to-marketplace-filter",
             "1-ff00:0:112#1 1-ff00:0:110#2,1 1-ff00:0:111#41",
         ],

@@ -534,15 +534,17 @@ func (pm *PathManager) buyReservation(
 		daemon.Querier{Connector: pm.d, IA: pm.localIA},
 		pm.topo,
 		pm.humm.Insecure,
-		pm.humm.BandwidthKbps,
-		pm.humm.ReverseBandwidthKbps,
-		startsAt,
-		stopsAt,
-		pm.humm.MaxPrice,
-		marketplaceBuyMode,
-		marketplaceFetchReservations,
-		marketplaceCombineAssets,
-		marketplacePurchaseRetries,
+		marketplace.ReservationRequest{
+			BwInKbps:        pm.humm.BandwidthKbps,
+			ReverseBwInKbps: pm.humm.ReverseBandwidthKbps,
+			StartsAt:        startsAt,
+			StopsAt:         stopsAt,
+			MaxPrice:        pm.humm.MaxPrice,
+			BuyMode:         marketplaceBuyMode,
+			FetchExisting:   marketplaceFetchReservations,
+			CombineAssets:   marketplaceCombineAssets,
+			NumRetries:      marketplacePurchaseRetries,
+		},
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marketplace reservation: %w", err)

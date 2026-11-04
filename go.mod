@@ -12,7 +12,7 @@ require (
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 )
 
-replace github.com/scionproto/scion => github.com/juagargi/scion v0.14.1-humm.0.0.20260925112558-e652dce4c389
+replace github.com/scionproto/scion => github.com/juagargi/scion v0.14.1-humm.0.0.20261104083128-93e1c30c3066
 
 require (
 	connectrpc.com/connect v1.19.0 // indirect

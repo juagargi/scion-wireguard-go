@@ -7,6 +7,7 @@ package conn
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"os"
@@ -49,6 +50,13 @@ func LoadScionConfigFromEnv() (*ScionConfig, error) {
 	// Load path policy from environment
 	if policy := os.Getenv(EnvSCIONPathPolicy); policy != "" {
 		config.PathPolicy = ParsePathPolicy(policy)
+	}
+
+	if raw := os.Getenv(EnvSCIONPathAPIAddress); raw != "" {
+		if err := ParseAPIAddress(raw); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", EnvSCIONPathAPIAddress, err)
+		}
+		config.APIAddress = raw
 	}
 
 	// Try to get SCION address from scion command first, then fallback to environment
@@ -105,7 +113,43 @@ const (
 
 	EnvHummingbirdPathToMarketplaceFilter = "HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER"
 	EnvHummingbirdPartial                 = "HUMMINGBIRD_PARTIAL"
+
+	// EnvHummingbirdMarketplaceAddress is the SCION API address of the marketplace every
+	// reservation is bought from, e.g. [71-2:0:5c,127.0.0.1]:31888. The Notes of the path are
+	// then not consulted.
+	EnvHummingbirdMarketplaceAddress = "HUMMINGBIRD_MARKETPLACE_ADDRESS"
 )
+
+// ParseMarketplaceAddress validates the address of a marketplace: either a SCION address
+// [ISD-AS,host]:port, or a host:port reachable over TCP, each optionally with a scheme.
+func ParseMarketplaceAddress(raw string) error {
+	if raw != strings.TrimSpace(raw) || strings.ContainsAny(raw, " \t") {
+		return fmt.Errorf("address %q contains whitespace", raw)
+	}
+	if _, rest, ok := strings.Cut(raw, "://"); ok {
+		raw = rest
+	}
+	hostPort, _, _ := strings.Cut(raw, "/")
+	host, port, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		return err
+	}
+	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
+		return fmt.Errorf("invalid port %q", port)
+	}
+	if host == "" {
+		return fmt.Errorf("missing host in %q", raw)
+	}
+	if ia, ip, ok := strings.Cut(host, ","); ok {
+		if _, err := addr.ParseIA(ia); err != nil {
+			return fmt.Errorf("invalid ISD-AS in %q: %w", raw, err)
+		}
+		if ip == "" {
+			return fmt.Errorf("missing host in SCION address %q", raw)
+		}
+	}
+	return nil
+}
 
 // LoadHummingbirdConfigFromEnv reads the Hummingbird configuration from the environment.
 // Bandwidths carry a unit (kbps, mbps or gbps),
@@ -117,6 +161,10 @@ func LoadHummingbirdConfigFromEnv() (HummingbirdConfig, error) {
 	// Otherwise the tunnel travels on best-effort SCION paths and no marketplace is ever contacted.
 	rawBandwidth := os.Getenv(EnvHummingbirdBandwidth)
 	if rawBandwidth == "" {
+		if os.Getenv(EnvHummingbirdMarketplaceAddress) != "" {
+			log.Printf("Warning: %s is ignored, Hummingbird is disabled because %s is unset",
+				EnvHummingbirdMarketplaceAddress, EnvHummingbirdBandwidth)
+		}
 		return cfg, nil
 	}
 	cfg.Enabled = true
@@ -144,6 +192,13 @@ func LoadHummingbirdConfigFromEnv() (HummingbirdConfig, error) {
 			return cfg, fmt.Errorf("parsing %s: %w", EnvHummingbirdPathToMarketplaceFilter, err)
 		}
 		cfg.PathToMarketplace = sequence
+	}
+
+	if raw := os.Getenv(EnvHummingbirdMarketplaceAddress); raw != "" {
+		if err := ParseMarketplaceAddress(raw); err != nil {
+			return cfg, fmt.Errorf("parsing %s: %w", EnvHummingbirdMarketplaceAddress, err)
+		}
+		cfg.MarketplaceAddress = raw
 	}
 
 	if raw := os.Getenv(EnvMarketplaceMaxPrice); raw != "" {
@@ -259,7 +314,24 @@ const (
 	EnvSCIONLocalIA    = "SCION_LOCAL_IA"
 	EnvSCIONTopology   = "SCION_TOPOLOGY_FILE"
 	EnvSCIONPathPolicy = "SCION_PATH_POLICY"
+
+	// EnvSCIONPathAPIAddress is the host:port the path manager API listens on, e.g. 127.0.0.1:28016.
+	// Unset, the API listens on :28015 or, if taken, on 28016 or 28017.
+	EnvSCIONPathAPIAddress = "SCION_PATH_API_ADDRESS"
 )
+
+// ParseAPIAddress validates a host:port as net.Listen takes it. The host may be empty.
+func ParseAPIAddress(raw string) error {
+	_, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		return err
+	}
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || p == 0 {
+		return fmt.Errorf("invalid port %q", port)
+	}
+	return nil
+}
 
 // GetConfigSummary returns a summary of current SCION configuration
 func GetConfigSummary() string {

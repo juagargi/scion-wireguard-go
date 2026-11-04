@@ -58,6 +58,13 @@ so only the JWT authenticating this client is configured.
   the daemon's paths once if none matches; without any match the purchase fails.
   Use it to keep the marketplace traffic off the reserved interfaces (default: the
   daemon's first path)
+* `HUMMINGBIRD_MARKETPLACE_ADDRESS`: SCION API address of the marketplace every
+  reservation is bought from, e.g. `[71-2:0:5c,127.0.0.1]:31888` (a plain `host:port` is
+  reached over TCP). The Notes of the path are not consulted. Use it where no path
+  advertises the marketplace, as on SCIERA when its location is overridden; it combines
+  with `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`, which still selects the path to it.
+  A malformed value is a configuration error; the variable is ignored, with a warning,
+  when `HUMMINGBIRD_BANDWIDTH` is unset
 
 Both reservations of a handover are valid at the same time, but only one of them
 ever carries traffic: the replacement is bought `RENEWAL_AHEAD` before the expiry
@@ -271,6 +278,12 @@ EOF
 
 The SCION Path Manager exposes an HTTP API for querying and managing paths.
 If enabled, it typically listens on `http://localhost:28015` (with fallbacks to 28016, 28017 if the default is in use).
+
+Set `SCION_PATH_API_ADDRESS` to a `host:port` as `net.Listen` takes it (`127.0.0.1:28016`,
+`[::1]:28016`, `:28016`) to listen exactly there. There is no fallback: if the address cannot be
+bound, wireguard-go fails to open its bind with an error naming the address. Use it to run several
+instances on one host, each with a known port, and to keep the API (which can set the path
+without authentication) off the external interfaces with a loopback address.
 
 ### 1. Get Available Paths
 

@@ -25,6 +25,10 @@ wireguard-go serves `/metrics` along the path manager's `/paths` API.
 It walks to 28016 and 28017 when the port is taken, so a scrape of an instance that has moved will
 also just fail.
 
+To pin an instance to a port, set `SCION_PATH_API_ADDRESS` (e.g. `:28016`, or `127.0.0.1:28016`).
+The address is then bound exactly, without fallback, and wireguard-go refuses to start if it is taken.
+Use it when several instances share a host, so Prometheus knows which one answers where.
+
 
 ## The metrics
 

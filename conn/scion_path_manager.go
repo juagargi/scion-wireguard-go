@@ -89,7 +89,11 @@ type PathManager struct {
 	filters map[addr.IA]*pathpol.Sequence
 
 	refresh    time.Duration
+	httpMu     sync.Mutex   // guards httpServer, which the API start may set asynchronously
 	httpServer *http.Server // Added for the API server
+
+	// apiAddr, if not empty, is the only address the API server listens on, without fallback.
+	apiAddr string
 
 	// Hummingbird settings
 	humm HummingbirdConfig
@@ -100,7 +104,17 @@ type PathManager struct {
 
 // NewPathManager wires up a new path manager.  The background refresh only
 // starts after Start() is called.
-func NewPathManager(d daemon.Connector, localIA addr.IA, pol PathPolicy, log Logger, opts ...PathManagerOption) *PathManager {
+//
+// Without WithAPIAddress the API server starts asynchronously on the default port or its
+// fallbacks, and failing to bind is only logged. With it the address is bound before returning,
+// and failing to do so is an error.
+func NewPathManager(
+	d daemon.Connector,
+	localIA addr.IA,
+	pol PathPolicy,
+	log Logger,
+	opts ...PathManagerOption,
+) (*PathManager, error) {
 	pm := &PathManager{
 		d:       d,
 		localIA: localIA,
@@ -114,6 +128,16 @@ func NewPathManager(d daemon.Connector, localIA addr.IA, pol PathPolicy, log Log
 		opt(pm)
 	}
 	pm.ctx, pm.cancel = context.WithCancel(context.Background())
+	if pm.apiAddr != "" {
+		// Strict: bind now, so that a wrong address stops the instance.
+		if err := pm.startAPIServerAt(pm.apiAddr); err != nil {
+			pm.cancel()
+			return nil, fmt.Errorf("PathManager API server cannot listen on %s (set by %s): %w",
+				pm.apiAddr, EnvSCIONPathAPIAddress, err)
+		}
+		pm.Start()
+		return pm, nil
+	}
 	pm.Start() // This starts the refresh loop
 	// Start the API server with default and fallback ports
 	go func() { // Run in a goroutine to not block NewPathManager
@@ -121,7 +145,7 @@ func NewPathManager(d daemon.Connector, localIA addr.IA, pol PathPolicy, log Log
 			pm.log.Errorf("Failed to start PathManager API server: %v", err)
 		}
 	}()
-	return pm
+	return pm, nil
 }
 
 // PathManagerOption configures a PathManager.
@@ -152,6 +176,12 @@ func WithPathFilters(filters map[addr.IA]*pathpol.Sequence) PathManagerOption {
 // to reach the marketplaces that are addressed over SCION.
 func WithTopology(topo snet.Topology) PathManagerOption {
 	return func(pm *PathManager) { pm.topo = topo }
+}
+
+// WithAPIAddress makes the API server listen exactly on addr (as net.Listen takes it),
+// without fallback ports, and makes NewPathManager fail if it cannot.
+func WithAPIAddress(addr string) PathManagerOption {
+	return func(pm *PathManager) { pm.apiAddr = addr }
 }
 
 func WithMetrics(m Metrics) PathManagerOption {
@@ -190,11 +220,14 @@ func (pm *PathManager) Close() {
 	}
 	pm.mu.Unlock()
 
-	if pm.httpServer != nil {
+	pm.httpMu.Lock()
+	server := pm.httpServer
+	pm.httpMu.Unlock()
+	if server != nil {
 		pm.log.Verbosef("Shutting down PathManager API server...")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		if err := pm.httpServer.Shutdown(shutdownCtx); err != nil {
+		if err := server.Shutdown(shutdownCtx); err != nil {
 			pm.log.Errorf("PathManager API server shutdown error: %v", err)
 		} else {
 			pm.log.Verbosef("PathManager API server gracefully shut down.")
@@ -619,6 +652,9 @@ func (pm *PathManager) buyReservationWithRetry(
 	return nil, nil, lastErr
 }
 
+// oneShotReservation buys a reservation from a marketplace. A variable so tests can replace it.
+var oneShotReservation = marketplace.OneShotReservation
+
 // buyReservation buys the flyovers of the currently selected path to dest from
 // the marketplace covering it, and those of the reverse direction when the
 // configuration asks for a bidirectional reservation.
@@ -646,7 +682,7 @@ func (pm *PathManager) buyReservation(
 	startsAt := startAt.Truncate(time.Second)
 	stopsAt := startsAt.Add(pm.humm.Duration)
 	timerStart := time.Now()
-	rsv, err := marketplace.OneShotReservation(
+	rsv, err := oneShotReservation(
 		ctx,
 		path,
 		pm.humm.JWT,
@@ -664,6 +700,8 @@ func (pm *PathManager) buyReservation(
 			CombineAssets:   marketplaceCombineAssets,
 			NumRetries:      marketplacePurchaseRetries,
 			Selected:        selected,
+
+			MarketplaceAddress: pm.humm.MarketplaceAddress,
 		},
 	)
 
@@ -981,19 +1019,51 @@ const (
 	fallbackAPIPort2 = 28017
 )
 
-// StartAPIServer initializes and starts the HTTP API server for the PathManager.
-// It tries the defaultPort and then any fallbackPorts if the initial ones are in use.
-func (pm *PathManager) StartAPIServer(defaultPort int, fallbackPorts ...int) error {
+// newAPIServer builds the HTTP API server of the PathManager.
+func (pm *PathManager) newAPIServer() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/paths", pm.handleGetPathsJSON())
 	mux.HandleFunc("/path", pm.handleSetPath())
 	mux.Handle("/metrics", promhttp.Handler())
-
-	pm.httpServer = &http.Server{
+	return &http.Server{
 		Handler: mux,
 		// Consider adding ReadTimeout, WriteTimeout, IdleTimeout for robustness
 	}
+}
 
+// serveAPI registers server and serves it on listener in the background.
+// If the manager was closed in the meantime, the listener is released instead.
+func (pm *PathManager) serveAPI(server *http.Server, listener net.Listener) {
+	pm.httpMu.Lock()
+	if pm.ctx.Err() != nil {
+		pm.httpMu.Unlock()
+		listener.Close()
+		return
+	}
+	pm.httpServer = server
+	pm.httpMu.Unlock()
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			pm.log.Errorf("PathManager API server crashed: %v", err)
+		}
+	}()
+	pm.log.Verbosef("PathManager API server started serving.")
+}
+
+// startAPIServerAt binds exactly address and serves the API on it in the background.
+func (pm *PathManager) startAPIServerAt(address string) error {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
+	pm.log.Verbosef("PathManager API server listening on %s", listener.Addr())
+	pm.serveAPI(pm.newAPIServer(), listener)
+	return nil
+}
+
+// StartAPIServer initializes and starts the HTTP API server for the PathManager.
+// It tries the defaultPort and then any fallbackPorts if the initial ones are in use.
+func (pm *PathManager) StartAPIServer(defaultPort int, fallbackPorts ...int) error {
 	portsToTry := append([]int{defaultPort}, fallbackPorts...)
 	var listener net.Listener
 	var err error
@@ -1017,13 +1087,7 @@ func (pm *PathManager) StartAPIServer(defaultPort int, fallbackPorts ...int) err
 	}
 
 	pm.log.Verbosef("PathManager API server listening on :%d", actualPort)
-	// This next line uses the standard log package for messages from http.Server
-	go func() {
-		if err := pm.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			pm.log.Errorf("PathManager API server crashed: %v", err)
-		}
-	}()
-	pm.log.Verbosef("PathManager API server started serving.")
+	pm.serveAPI(pm.newAPIServer(), listener)
 	return nil
 }
 

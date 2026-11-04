@@ -90,6 +90,10 @@ type ScionConfig struct {
 	LocalIP     net.IP
 	LocalPort   uint16
 	Hummingbird HummingbirdConfig
+
+	// APIAddress, if not empty, is the only address of the path manager API; see
+	// EnvSCIONPathAPIAddress.
+	APIAddress string
 }
 
 type PathPolicy int
@@ -224,17 +228,29 @@ func (s *ScionNetBind) initSCION() error {
 		s.logger.Errorf("Hummingbird: marketplace certificate validation is disabled")
 	}
 
-	s.pathManager = NewPathManager(
-		s.daemonConn,        // SCION daemon connection
-		s.config.LocalIA,    // our IA
-		s.config.PathPolicy, // selection policy
-		s.logger,
-		WithRefreshInterval(5*time.Minute),
+	opts := []PathManagerOption{
+		WithRefreshInterval(5 * time.Minute),
 		WithTopology(topo),
 		WithHummingbird(s.config.Hummingbird),
 		WithPathFilters(s.pathFilters),
 		WithMetrics(wireguardMetrics),
+	}
+	if s.config.APIAddress != "" {
+		opts = append(opts, WithAPIAddress(s.config.APIAddress))
+	}
+	s.pathManager, err = NewPathManager(
+		s.daemonConn,        // SCION daemon connection
+		s.config.LocalIA,    // our IA
+		s.config.PathPolicy, // selection policy
+		s.logger,
+		opts...,
 	)
+	if err != nil {
+		s.pathManager = nil
+		s.daemonConn.Close()
+		s.daemonConn = nil
+		return err
+	}
 	s.logger.Verbosef("SCION network initialized with IA %s", s.config.LocalIA)
 
 	return nil

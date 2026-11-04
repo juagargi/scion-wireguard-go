@@ -69,6 +69,10 @@ type HummingbirdConfig struct {
 	// matching the sequence. Nil uses the daemon's first path.
 	PathToMarketplace *pathpol.Sequence
 
+	// MarketplaceAddress, if not empty, is the API address of the marketplace every reservation
+	// is bought from, instead of the one the Notes of the path advertise.
+	MarketplaceAddress string
+
 	// MaxPrice is the most this client is willing to pay for one reservation.
 	MaxPrice uint64
 

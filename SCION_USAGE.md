@@ -60,6 +60,34 @@ expires, the tunnel falls back to the plain SCION path until one does.
 
 ---
 
+## Testing over a Local Topology
+
+The tests in `tests/` run the tunnel between two tester containers of a SCION *tiny*
+topology of the Hummingbird fork, which has to be generated and running already:
+
+```bash
+cd <scion-dir>
+./scion.sh topology -d -c topology/tiny.topo -m 1-ff00:0:111
+./scion.sh start
+```
+
+* `tests/scion-end2end.py`: one run, sending a file through the tunnel with `rsync`
+  and comparing its md5 sum on both ends. Its flags select the payload size, the
+  Hummingbird bandwidths, `--hummingbird` to buy reservations (off by default), and
+  more; see `--help`.
+* `tests/scion-integration.py`: checks that the tiny topology is running in
+  `--scion-dir`, then runs `scion-end2end.py` once per selected test, e.g.
+  `--test-smoke` (best effort, no Hummingbird), `--test-hummingbird` (a transfer
+  spanning several reservation renewals), or `--test-all`.
+
+```bash
+./tests/scion-integration.py --scion-dir <scion-dir> --test-all
+# or, equivalently
+make test-integration SCION_DIR=<scion-dir>
+```
+
+---
+
 ## Notes
 
 * Use `socat` instead of `wg` to interact with the UAPI socket for SCION configurations.

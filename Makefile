@@ -25,6 +25,11 @@ install: wireguard-go
 test:
 	go test ./...
 
+# Runs every SCION integration test on a running tiny topology. Point it at the
+# checkout holding that topology with SCION_DIR, e.g. make test-integration SCION_DIR=~/scion
+test-integration:
+	./tests/scion-integration.py $(if $(SCION_DIR),--scion-dir "$(SCION_DIR)") --test-all
+
 clean:
 	rm -f wireguard-go
 
@@ -38,4 +43,4 @@ hummingbird-update-external-replace:
 
 
 
-.PHONY: all clean test install generate-version-and-build
+.PHONY: all clean test test-integration install generate-version-and-build

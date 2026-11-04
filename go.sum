@@ -66,8 +66,8 @@ github.com/iancoleman/strcase v0.3.0 h1:nTXanmYxhfFAMjZL34Ov6gkzEsSJZ5DbhxWjvSAS
 github.com/iancoleman/strcase v0.3.0/go.mod h1:iwCmte+B7n89clKwxIoIXy/HfoL7AsD47ZCWhYzw7ho=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
-github.com/juagargi/scion v0.14.1-humm.0.0.20260925112558-e652dce4c389 h1:9hWp5ZwSoDsmJCeS95lwZJqnlCpvAQoR5KhUYPyDu1Q=
-github.com/juagargi/scion v0.14.1-humm.0.0.20260925112558-e652dce4c389/go.mod h1:mEwBPWs+CioUYFsw8uXNePlzHpiq3G3pFWPAWe+Vs+k=
+github.com/juagargi/scion v0.14.1-humm.0.0.20261104083128-93e1c30c3066 h1:CAfC1FRy2e62ICa5Z16gcyVVhmArCIh8L4jcYjq3N8I=
+github.com/juagargi/scion v0.14.1-humm.0.0.20261104083128-93e1c30c3066/go.mod h1:mEwBPWs+CioUYFsw8uXNePlzHpiq3G3pFWPAWe+Vs+k=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
 github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zttxdo=

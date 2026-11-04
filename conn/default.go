@@ -62,7 +62,7 @@ func (w *LoggerWrapper) Verbosef(format string, args ...interface{}) {
 	}
 	verbosef := val.FieldByName("Verbosef")
 	if verbosef.IsValid() && !verbosef.IsNil() {
-		verbosef.Call([]reflect.Value{
+		verbosef.CallSlice([]reflect.Value{
 			reflect.ValueOf(format),
 			reflect.ValueOf(args),
 		})
@@ -82,7 +82,7 @@ func (w *LoggerWrapper) Errorf(format string, args ...interface{}) {
 
 	errorf := val.FieldByName("Errorf")
 	if errorf.IsValid() && !errorf.IsNil() {
-		errorf.Call([]reflect.Value{
+		errorf.CallSlice([]reflect.Value{
 			reflect.ValueOf(format),
 			reflect.ValueOf(args),
 		})

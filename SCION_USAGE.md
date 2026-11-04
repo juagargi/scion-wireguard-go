@@ -45,12 +45,65 @@ so only the JWT authenticating this client is configured.
 * `HUMMINGBIRD_MAX_PRICE`: Most this client will pay for one reservation (default: unlimited)
 * `HUMMINGBIRD_MARKETPLACE_INSECURE=1`: Do not validate the marketplace server certificate,
   e.g. for the marketplaces of a local topology, which serve self-signed ones (default: `0`)
+* `HUMMINGBIRD_PARTIAL`: Reserve only in some ASes of the path; the others are crossed
+  as plain SCION hops. Either a comma separated allow-list of the ASes to reserve in
+  (`1-ff00:0:110,1-ff00:0:111`), or a deny-list of ASes prefixed with `!` to leave out
+  (`!1-ff00:0:110`); the two forms cannot be mixed. ASes not on the path are ignored,
+  renewals use the same selection, and a reverse reservation covers only the mirrored
+  ASes. A selection with no AS of the path buys nothing, and the traffic stays on the
+  plain SCION path (default: every AS of the path)
+* `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`: Hop predicates, with the syntax of
+  `scion showpaths --sequence`, that the path to a marketplace in another AS must match,
+  e.g. `"1-ff00:0:110#3 0*"`. The first matching path of the daemon is used, refreshing
+  the daemon's paths once if none matches; without any match the purchase fails.
+  Use it to keep the marketplace traffic off the reserved interfaces (default: the
+  daemon's first path)
 
 Both reservations of a handover are valid at the same time, but only one of them
 ever carries traffic: the replacement is bought `RENEWAL_AHEAD` before the expiry
 and takes over at `RESERVATION_OVERLAP` before it, which leaves the roundtrip room
 to fail and be retried. If no purchase succeeds before the current reservation
 expires, the tunnel falls back to the plain SCION path until one does.
+
+---
+
+## Testing over a Local Topology
+
+The tests in `tests/` run the tunnel between two tester containers of a SCION *tiny*
+topology of the Hummingbird fork, which has to be generated and running already:
+
+```bash
+cd <scion-dir>
+./scion.sh topology -d -c topology/tiny.topo -m 1-ff00:0:111
+./scion.sh start
+```
+
+* `tests/scion-end2end.py`: one run, sending a file through the tunnel with `rsync`
+  and comparing its md5 sum on both ends. Its flags select the payload size, the
+  Hummingbird bandwidths, `--hummingbird` to buy reservations (off by default), and
+  more; see `--help`.
+* `tests/scion-integration.py`: checks that the tiny topology is running in
+  `--scion-dir`, then runs `scion-end2end.py` once per selected test, or all of them
+  with `--test-all` (about 80 s):
+  * `--test-smoke`: a small transfer over best-effort paths, without Hummingbird.
+  * `--test-no-peer-path`: a `scion_path_filter` excluding every path to the peer
+    makes the sender reject it.
+  * `--test-no-marketplace-path`: a `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`
+    excluding every path to the marketplace makes every purchase fail.
+  * `--test-no-partial-as`: a `HUMMINGBIRD_PARTIAL` selecting no AS of the path
+    buys nothing.
+  * `--test-hummingbird`: a small transfer on a reservation, bought without filters
+    from the marketplace in the sender's own AS, with flyovers in every AS.
+  * `--test-filters`: both filters and a partial reservation at once, from the AS
+    without the marketplace; checks that the peer and the marketplace were reached over
+    the filtered paths, that every reservation held flyovers in exactly the selected
+    ASes, and that it was renewed twice, each time over a filtered marketplace path.
+
+```bash
+./tests/scion-integration.py --scion-dir <scion-dir> --test-all
+# or, equivalently
+make test-integration SCION_DIR=<scion-dir>
+```
 
 ---
 
@@ -188,6 +241,31 @@ set=1
 scion_path_policy=latency
 EOF
 ```
+
+### Path Filters
+
+The paths to an AS can be restricted to those matching a sequence of hop predicates,
+with the syntax of `scion showpaths --sequence`. Paths that do not match are discarded
+before the path policy ranks the rest, so neither the traffic, nor a path chosen through
+the HTTP API, nor a Hummingbird reservation ever uses them.
+
+```bash
+cat << EOF | socat - UNIX-CONNECT:"$UAPI_SOCKET"
+set=1
+scion_path_filter=1-ff00:0:112 1-ff00:0:111#41 1-ff00:0:110#1,2 1-ff00:0:112#1
+EOF
+```
+
+* Set one filter per AS; setting another one for the same AS replaces it, and
+  `scion_path_filter=<ISD-AS>` alone removes it. `get=1` lists them all.
+* Filters are best set before the peer's `scion_endpoint`, so that no packet ever
+  leaves on another path. A filter set later takes effect right away: if it changes
+  the selected path, the current reservation is dropped and a new one is bought for
+  the new path.
+* When no path matches, there is no fallback: a `scion_endpoint` in that AS is
+  rejected, and packets to it are dropped.
+* A reverse reservation advertised by the peer travels on the path the peer chose,
+  and is used for the replies regardless of the filter.
 
 ## Path Manager HTTP API
 

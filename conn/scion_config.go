@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	humm "github.com/scionproto/scion/pkg/hummingbird"
 	"github.com/scionproto/scion/pkg/hummingbird/bwencoding"
+	"github.com/scionproto/scion/private/path/pathpol"
 )
 
 const (
@@ -100,6 +102,9 @@ const (
 	EnvHummingbirdRenewalAhead     = "HUMMINGBIRD_RENEWAL_AHEAD"
 	EnvHummingbirdOverlap          = "HUMMINGBIRD_RESERVATION_OVERLAP"
 	EnvHummingbirdStartOffset      = "HUMMINGBIRD_START_OFFSET"
+
+	EnvHummingbirdPathToMarketplaceFilter = "HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER"
+	EnvHummingbirdPartial                 = "HUMMINGBIRD_PARTIAL"
 )
 
 // LoadHummingbirdConfigFromEnv reads the Hummingbird configuration from the environment.
@@ -124,6 +129,22 @@ func LoadHummingbirdConfigFromEnv() (HummingbirdConfig, error) {
 
 	cfg.JWT = os.Getenv(EnvMarketplaceJWT)
 	cfg.Insecure = boolEnv(EnvMarketplaceInsecure, cfg.Insecure)
+
+	if raw := os.Getenv(EnvHummingbirdPartial); raw != "" {
+		partial, err := humm.ParseASFilter(raw)
+		if err != nil {
+			return cfg, fmt.Errorf("parsing %s: %w", EnvHummingbirdPartial, err)
+		}
+		cfg.Partial = partial
+	}
+
+	if raw := os.Getenv(EnvHummingbirdPathToMarketplaceFilter); raw != "" {
+		sequence, err := pathpol.NewSequence(raw)
+		if err != nil {
+			return cfg, fmt.Errorf("parsing %s: %w", EnvHummingbirdPathToMarketplaceFilter, err)
+		}
+		cfg.PathToMarketplace = sequence
+	}
 
 	if raw := os.Getenv(EnvMarketplaceMaxPrice); raw != "" {
 		price, err := strconv.ParseUint(raw, 10, 64)

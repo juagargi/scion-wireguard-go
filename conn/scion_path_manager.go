@@ -7,6 +7,7 @@ package conn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -452,6 +453,18 @@ func (pm *PathManager) SetPathFilter(dest addr.IA, sequence *pathpol.Sequence) e
 	return nil
 }
 
+// stopRenewal forgets the renewal of dest that ctx belongs to, so that the next
+// refresh of dest starts a new one.
+func (pm *PathManager) stopRenewal(ctx context.Context, dest addr.IA) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	// A cancelled renewal has already been replaced, or the manager is closing.
+	if entry := pm.cache[dest]; entry != nil && ctx.Err() == nil && entry.CancelRenewal != nil {
+		entry.CancelRenewal()
+		entry.CancelRenewal = nil
+	}
+}
+
 // HasPathFilter reports whether the paths to dest are restricted by a filter.
 func (pm *PathManager) HasPathFilter(dest addr.IA) bool {
 	pm.mu.RLock()
@@ -509,6 +522,14 @@ func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA)
 		}
 
 		rsv, nextHop, err := pm.buyReservationWithRetry(ctx, dest, startAt)
+		if errors.Is(err, errNoASSelected) {
+			// Nothing to buy on this path. A later refresh restarts the renewal,
+			// in case the path changes.
+			pm.log.Verbosef("Hummingbird reservation for %s not bought: %v (partial: %s)",
+				dest, err, pm.humm.Partial)
+			pm.stopRenewal(ctx, dest)
+			return
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -549,7 +570,8 @@ func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA)
 		}
 		pm.installReservation(ctx, dest, rsv, nextHop)
 
-		pm.log.Verbosef("Hummingbird reservation for %s in use, expires at %s", dest, expiry)
+		pm.log.Verbosef("Hummingbird reservation for %s in use, expires at %s, flyovers at %v",
+			dest, expiry, flyoverIAs(rsv))
 		requestAt, handoverAt, startAt = renewalSchedule(expiry,
 			pm.humm.RenewalAhead, pm.humm.ReservationOverlap, pm.humm.StartOffset)
 	}
@@ -570,8 +592,8 @@ func (pm *PathManager) buyReservationWithRetry(
 			return nil, nil, ctx.Err()
 		}
 		rsv, nextHop, err := pm.buyReservation(ctx, dest, startAt)
-		if err == nil {
-			return rsv, nextHop, nil
+		if err == nil || errors.Is(err, errNoASSelected) {
+			return rsv, nextHop, err
 		}
 		lastErr = err
 		pm.log.Verbosef("Buying Hummingbird reservation for %s failed (attempt %d/%d): %v",
@@ -605,6 +627,10 @@ func (pm *PathManager) buyReservation(
 	if err != nil {
 		return nil, nil, err
 	}
+	selected, err := pm.humm.partialSelection(path)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Whole seconds: a flyover carries its start time and its duration in
 	// seconds, and the marketplace matches the assets it sold on exactly the
@@ -629,6 +655,7 @@ func (pm *PathManager) buyReservation(
 			FetchExisting:   marketplaceFetchReservations,
 			CombineAssets:   marketplaceCombineAssets,
 			NumRetries:      marketplacePurchaseRetries,
+			Selected:        selected,
 		},
 	)
 	if err != nil {

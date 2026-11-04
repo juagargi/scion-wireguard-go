@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -9,8 +10,10 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/daemon"
 	"github.com/scionproto/scion/pkg/daemon/types"
+	humm "github.com/scionproto/scion/pkg/hummingbird"
 	"github.com/scionproto/scion/pkg/hummingbird/marketplace"
 	"github.com/scionproto/scion/pkg/snet"
+	snetpath "github.com/scionproto/scion/pkg/snet/path"
 	"github.com/scionproto/scion/private/path/pathpol"
 )
 
@@ -57,6 +60,10 @@ type HummingbirdConfig struct {
 
 	// Insecure disables the validation of the marketplace server certificate.
 	Insecure bool
+
+	// Partial restricts the reservations to some ASes of the path; the others are
+	// crossed as plain SCION hops. Nil reserves every AS of the path.
+	Partial *humm.ASFilter
 
 	// PathToMarketplace restricts the path to a marketplace in another AS to those
 	// matching the sequence. Nil uses the daemon's first path.
@@ -135,6 +142,31 @@ func (c HummingbirdConfig) Validate() error {
 		return fmt.Errorf("start offset must not be positive, is %s", c.StartOffset)
 	}
 	return nil
+}
+
+// errNoASSelected reports that Partial selects no AS of the path, so there is
+// nothing to reserve on it.
+var errNoASSelected = errors.New("the partial reservation selects no AS of the path")
+
+// partialSelection returns the indices, into the hops of path, of the ASes to reserve
+// in the form the marketplace takes them: nil when every AS is reserved.
+func (c HummingbirdConfig) partialSelection(path snet.Path) ([]int, error) {
+	selected := c.Partial.MarketSelection(snetpath.InterfacesToBaseHops(path.Metadata().Interfaces))
+	if selected != nil && len(selected) == 0 {
+		return nil, errNoASSelected
+	}
+	return selected, nil
+}
+
+// flyoverIAs lists, in path order, the ASes in which rsv holds a flyover.
+func flyoverIAs(rsv *snetpath.Reservation) []addr.IA {
+	var ias []addr.IA
+	for _, hop := range rsv.Hops {
+		if hop != nil && hop.Flyover != nil {
+			ias = append(ias, hop.IA)
+		}
+	}
+	return ias
 }
 
 // marketplaceQuerier returns the querier the marketplace client looks up its path with:

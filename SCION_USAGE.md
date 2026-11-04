@@ -45,6 +45,13 @@ so only the JWT authenticating this client is configured.
 * `HUMMINGBIRD_MAX_PRICE`: Most this client will pay for one reservation (default: unlimited)
 * `HUMMINGBIRD_MARKETPLACE_INSECURE=1`: Do not validate the marketplace server certificate,
   e.g. for the marketplaces of a local topology, which serve self-signed ones (default: `0`)
+* `HUMMINGBIRD_PARTIAL`: Reserve only in some ASes of the path; the others are crossed
+  as plain SCION hops. Either a comma separated allow-list of the ASes to reserve in
+  (`1-ff00:0:110,1-ff00:0:111`), or a deny-list of ASes prefixed with `!` to leave out
+  (`!1-ff00:0:110`); the two forms cannot be mixed. ASes not on the path are ignored,
+  renewals use the same selection, and a reverse reservation covers only the mirrored
+  ASes. A selection with no AS of the path buys nothing, and the traffic stays on the
+  plain SCION path (default: every AS of the path)
 * `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`: Hop predicates, with the syntax of
   `scion showpaths --sequence`, that the path to a marketplace in another AS must match,
   e.g. `"1-ff00:0:110#3 0*"`. The first matching path of the daemon is used, refreshing
@@ -77,17 +84,20 @@ cd <scion-dir>
   more; see `--help`.
 * `tests/scion-integration.py`: checks that the tiny topology is running in
   `--scion-dir`, then runs `scion-end2end.py` once per selected test, or all of them
-  with `--test-all` (about 70 s):
+  with `--test-all` (about 80 s):
   * `--test-smoke`: a small transfer over best-effort paths, without Hummingbird.
   * `--test-no-peer-path`: a `scion_path_filter` excluding every path to the peer
     makes the sender reject it.
   * `--test-no-marketplace-path`: a `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`
     excluding every path to the marketplace makes every purchase fail.
+  * `--test-no-partial-as`: a `HUMMINGBIRD_PARTIAL` selecting no AS of the path
+    buys nothing.
   * `--test-hummingbird`: a small transfer on a reservation, bought without filters
-    from the marketplace in the sender's own AS.
-  * `--test-filters`: both filters at once, from the AS without the marketplace; checks
-    that the peer and the marketplace were reached over the filtered paths, and that
-    the reservation was renewed twice, each time over a filtered marketplace path.
+    from the marketplace in the sender's own AS, with flyovers in every AS.
+  * `--test-filters`: both filters and a partial reservation at once, from the AS
+    without the marketplace; checks that the peer and the marketplace were reached over
+    the filtered paths, that every reservation held flyovers in exactly the selected
+    ASes, and that it was renewed twice, each time over a filtered marketplace path.
 
 ```bash
 ./tests/scion-integration.py --scion-dir <scion-dir> --test-all

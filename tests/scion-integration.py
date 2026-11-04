@@ -68,10 +68,24 @@ TESTS: dict[str, Case] = {
             "--expect", "marketplace-unreachable",
         ],
     ),
+    "no-partial-as": Case(
+        # 1-ff00:0:999 is not on the path, so the allow-list selects none of its ASes.
+        help="a partial reservation that selects no AS of the path buys nothing",
+        args=[
+            "--hummingbird",
+            "--partial", "1-ff00:0:999",
+            "--expect", "partial-empty",
+        ],
+    ),
     "hummingbird": Case(
         # The sender shares its AS with the marketplace, which it reaches without a path.
-        help="a small transfer on a Hummingbird reservation bought without any filter",
-        args=["--hummingbird", "--size", "10M"],
+        help="a small transfer on a Hummingbird reservation bought without any filter, "
+        "with flyovers in every AS of the path",
+        args=[
+            "--hummingbird",
+            "--size", "10M",
+            "--expect-flyovers", "1-ff00:0:111,1-ff00:0:110,1-ff00:0:112",
+        ],
     ),
     "filters": Case(
         # From 1-ff00:0:112 the marketplace in 1-ff00:0:111 is remote, so both filters
@@ -81,7 +95,9 @@ TESTS: dict[str, Case] = {
         # about 23 s, enough for two handovers, each of them a purchase that has to
         # find its path to the marketplace through the filter again. The 12 s ahead
         # covers the 10 s purchase timeout of wireguard-go.
-        help="traffic, reservations and their renewals on the paths that "
+        # The partial reservation leaves out the core AS, which the traffic then crosses
+        # as a plain SCION hop.
+        help="traffic, partial reservations and their renewals on the paths that "
         "scion_path_filter and HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER allow",
         args=[
             "--hummingbird",
@@ -92,6 +108,8 @@ TESTS: dict[str, Case] = {
             "--renewal-ahead", "12s",
             "--overlap", "8s",
             "--min-handovers", "2",
+            "--partial", "!1-ff00:0:110",
+            "--expect-flyovers", "1-ff00:0:112,1-ff00:0:111",
             "--path-filter", "1-ff00:0:112#1 1-ff00:0:110#2,1 1-ff00:0:111#41",
             "--path-to-marketplace-filter",
             "1-ff00:0:112#1 1-ff00:0:110#2,1 1-ff00:0:111#41",

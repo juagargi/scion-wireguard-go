@@ -2,12 +2,15 @@ package conn
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/daemon"
 	"github.com/scionproto/scion/pkg/daemon/types"
+	humm "github.com/scionproto/scion/pkg/hummingbird"
 	"github.com/scionproto/scion/pkg/segment/iface"
 	"github.com/scionproto/scion/pkg/snet"
 	snetpath "github.com/scionproto/scion/pkg/snet/path"
@@ -145,5 +148,60 @@ func TestSequenceQuerier(t *testing.T) {
 	d = &fakeDaemon{paths: []snet.Path{testPath(2)}, refreshed: []snet.Path{testPath(2)}}
 	if _, err = (sequenceQuerier{d: d, local: local, sequence: sequence}).Query(context.Background(), dst); err == nil {
 		t.Errorf("no path matches, yet no error")
+	}
+}
+
+func TestLoadHummingbirdPartial(t *testing.T) {
+	t.Setenv(EnvHummingbirdBandwidth, "1mbps")
+	t.Setenv(EnvMarketplaceJWT, "token")
+	t.Setenv(EnvHummingbirdDuration, "60s")
+
+	cfg, err := LoadHummingbirdConfigFromEnv()
+	if err != nil || cfg.Partial != nil {
+		t.Fatalf("without %s every AS must be reserved, got %v, %v",
+			EnvHummingbirdPartial, cfg.Partial, err)
+	}
+
+	t.Setenv(EnvHummingbirdPartial, "!1-ff00:0:110")
+	if cfg, err = LoadHummingbirdConfigFromEnv(); err != nil || cfg.Partial == nil {
+		t.Fatalf("deny-list not loaded: %v, %v", cfg.Partial, err)
+	}
+
+	t.Setenv(EnvHummingbirdPartial, "1-ff00:0:110,!1-ff00:0:111")
+	if _, err := LoadHummingbirdConfigFromEnv(); err == nil {
+		t.Errorf("a list mixing allowed and denied ASes was accepted")
+	}
+}
+
+func TestPartialSelection(t *testing.T) {
+	// testPath crosses 1-ff00:0:110 and then 1-ff00:0:111.
+	path := testPath(3)
+	parse := func(raw string) *humm.ASFilter {
+		filter, err := humm.ParseASFilter(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filter
+	}
+
+	for name, tc := range map[string]struct {
+		partial *humm.ASFilter
+		want    []int
+		err     error
+	}{
+		"every AS by default":     {partial: nil, want: nil},
+		"every AS listed":         {partial: parse("1-ff00:0:110,1-ff00:0:111"), want: nil},
+		"deny-list":               {partial: parse("!1-ff00:0:110"), want: []int{1}},
+		"allow-list":              {partial: parse("1-ff00:0:110"), want: []int{0}},
+		"no AS of the path":       {partial: parse("1-ff00:0:999"), err: errNoASSelected},
+		"every AS of path denied": {partial: parse("!1-ff00:0:110,!1-ff00:0:111"), err: errNoASSelected},
+	} {
+		got, err := HummingbirdConfig{Partial: tc.partial}.partialSelection(path)
+		if !errors.Is(err, tc.err) || fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("%s: got %v, %v; want %v, %v", name, got, err, tc.want, tc.err)
+		}
+		if tc.want == nil && tc.err == nil && got != nil {
+			t.Errorf("%s: every AS must be requested as nil, got %v", name, got)
+		}
 	}
 }

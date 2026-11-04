@@ -619,6 +619,53 @@ def check_marketplace_path(log: Path) -> None:
     print(f"    {found.group(0).strip()}")
 
 
+# The ASes in which a reservation in use holds a flyover, as the sender logs them.
+FLYOVERS = re.compile(r"Hummingbird reservation for \S+ in use, .*, flyovers at \[(.*)\]")
+
+# What the sender logs when --partial selects no AS of the path.
+PARTIAL_EMPTY = re.compile(
+    r"Hummingbird reservation for .* not bought: the partial reservation selects no AS.*"
+)
+
+
+def check_flyovers(log: Path, expected: str) -> None:
+    """Fail unless every reservation used held flyovers in exactly the expected ASes."""
+    want = [ia.strip() for ia in expected.split(",") if ia.strip()]
+    used = FLYOVERS.findall(log.read_text(errors="replace"))
+    if not used:
+        raise TestFailure("the sender never logged the flyovers of a reservation in use")
+    for flyovers in used:
+        if flyovers.split() != want:
+            raise TestFailure(
+                f"a reservation in use holds flyovers at [{flyovers}], expected at "
+                f"[{' '.join(want)}]"
+            )
+    print(f"    {len(used)} reservations used, each with flyovers at [{used[-1]}]")
+
+
+def expect_partial_empty(log: Path, timeout: float) -> None:
+    """Pass if the sender buys nothing, since --partial selects no AS of the path."""
+    deadline = time.monotonic() + timeout
+    while True:
+        text = log.read_text(errors="replace")
+        if RESERVATION_IN_USE.search(text):
+            raise TestFailure(
+                "the sender got a reservation although --partial selects no AS of the path"
+            )
+        found = PARTIAL_EMPTY.search(text)
+        if found:
+            print(f"    {found.group(0).strip()}")
+            raise ExpectedOutcome(
+                "the sender bought no reservation, since --partial selects no AS of the path."
+            )
+        if time.monotonic() >= deadline:
+            raise TestFailure(
+                f"the sender did not report within {timeout:.0f}s that --partial selects "
+                f"no AS of the path; see {log}"
+            )
+        time.sleep(0.5)
+
+
 # What the sender logs when no path to the marketplace matches its filter.
 MARKETPLACE_UNREACHABLE = re.compile(
     r"Buying Hummingbird reservation for .* failed.*none of the \d+ paths .* matches the "
@@ -1150,6 +1197,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="seconds to wait for the first Hummingbird reservation to carry traffic",
     )
     parser.add_argument(
+        "--partial",
+        default=None,
+        metavar="IAS",
+        help="reserve only in some ASes of the path, as HUMMINGBIRD_PARTIAL: a comma "
+        "separated allow-list (1-ff00:0:110,1-ff00:0:111) or deny-list (!1-ff00:0:110)",
+    )
+    parser.add_argument(
+        "--expect-flyovers",
+        default=None,
+        metavar="IAS",
+        help="comma separated ASes, in path order, in which every reservation used must "
+        "hold a flyover, and no others",
+    )
+    parser.add_argument(
         "--min-handovers",
         type=int,
         default=0,
@@ -1158,12 +1219,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--expect",
-        choices=["peer-unreachable", "marketplace-unreachable"],
+        choices=["peer-unreachable", "marketplace-unreachable", "partial-empty"],
         default=None,
         help="pass only if the run fails this way, and stop there without a transfer: "
         "peer-unreachable when --path-filter excludes every path to the receiver, "
         "marketplace-unreachable when --path-to-marketplace-filter excludes every path "
-        "to the marketplace",
+        "to the marketplace, partial-empty when --partial selects no AS of the path",
     )
     parser.add_argument(
         "--transfer-timeout",
@@ -1230,13 +1291,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             hummingbird["HUMMINGBIRD_RENEWAL_AHEAD"] = args.renewal_ahead
         if args.overlap:
             hummingbird["HUMMINGBIRD_RESERVATION_OVERLAP"] = args.overlap
+        if args.partial:
+            hummingbird["HUMMINGBIRD_PARTIAL"] = args.partial
         if args.path_to_marketplace_filter:
             hummingbird["HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER"] = (
                 args.path_to_marketplace_filter
             )
-    elif args.path_to_marketplace_filter:
-        raise TestFailure("--path-to-marketplace-filter needs --hummingbird")
+    elif args.path_to_marketplace_filter or args.partial or args.expect_flyovers:
+        raise TestFailure(
+            "--path-to-marketplace-filter, --partial and --expect-flyovers need --hummingbird"
+        )
 
+    if args.expect == "partial-empty" and not (args.hummingbird and args.partial):
+        parser.error("--expect=partial-empty needs --hummingbird and --partial")
     if args.expect == "peer-unreachable" and not args.path_filter:
         parser.error("--expect=peer-unreachable needs --path-filter")
     if args.expect == "marketplace-unreachable" and not (
@@ -1286,6 +1353,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("== checking that the sender filtered its paths to the receiver")
             check_path_filter(wireguard_log(log_dir, source), dest)
 
+        if args.expect == "partial-empty":
+            print("== checking that the sender buys nothing for an empty selection")
+            expect_partial_empty(wireguard_log(log_dir, source), args.reservation_timeout)
         if args.expect == "marketplace-unreachable":
             print("== checking that the sender cannot reach the marketplace")
             expect_marketplace_unreachable(
@@ -1332,6 +1402,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if dest_md5 != source_md5:
             raise TestFailure(f"md5 mismatch: source {source_md5}, destination {dest_md5}")
         print(f"    {dest_size} bytes, md5 {dest_md5} — identical")
+
+        if args.expect_flyovers:
+            print("== checking the ASes in which the reservations held flyovers")
+            check_flyovers(wireguard_log(log_dir, source), args.expect_flyovers)
 
         if args.min_handovers:
             print("== checking that the reservation was renewed along the way")

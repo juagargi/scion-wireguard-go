@@ -681,6 +681,10 @@ func (pm *PathManager) buyReservation(
 	// timestamps it was asked for.
 	startsAt := startAt.Truncate(time.Second)
 	stopsAt := startsAt.Add(pm.humm.Duration)
+	if pm.humm.MarketplaceAddress != "" {
+		pm.log.Verbosef("Hummingbird: buying the reservation for %s from the marketplace at %s, "+
+			"set by %s", dest, pm.humm.MarketplaceAddress, EnvHummingbirdMarketplaceAddress)
+	}
 	timerStart := time.Now()
 	rsv, err := oneShotReservation(
 		ctx,

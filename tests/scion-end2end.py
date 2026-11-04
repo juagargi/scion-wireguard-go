@@ -72,6 +72,9 @@ TUNNEL_PREFIX_LEN = 24
 INTERFACE = "wg0"
 UAPI_SOCKET = f"/var/run/wireguard/{INTERFACE}.sock"
 
+# A second instance, started with --path-api-address on the address the first one holds.
+DUPLICATE_INTERFACE = "wg-dup"
+
 # WireGuard has to listen inside SCION's dispatch range (31000-32767), otherwise the
 # border router will not deliver the packets to the end host.
 WIREGUARD_PORT = 32000
@@ -415,7 +418,8 @@ def kill_wireguard(topology: Topology, endpoint: Endpoint) -> None:
         endpoint.service,
         f"pkill -x wireguard-go >/dev/null 2>&1;"
         f" ip link del dev {INTERFACE} >/dev/null 2>&1;"
-        f" rm -f {UAPI_SOCKET} {UAPI_HELPER}; true",
+        f" ip link del dev {DUPLICATE_INTERFACE} >/dev/null 2>&1;"
+        f" rm -f {UAPI_SOCKET} /var/run/wireguard/{DUPLICATE_INTERFACE}.sock {UAPI_HELPER}; true",
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -757,8 +761,13 @@ def check_renewals_filtered(log: Path) -> None:
     print(f"    {lookups} filtered paths to the marketplace for {in_use} reservations used")
 
 
-def marketplace_website(topology: Topology) -> str:
-    """The registration web app of the marketplace the generated topology advertises."""
+def marketplace_website(topology: Topology, override: bool = False) -> str:
+    """The registration web app of the marketplace the generated topology advertises.
+
+    With the override nothing is advertised, so it is the web app of the marketplace's own API address.
+    """
+    if override:
+        return "https://" + marketplace_api_address(topology)
     websites: set[str] = set()
     for path in sorted((topology.root / "gen").glob("AS*/staticInfoConfig.json")):
         try:
@@ -782,9 +791,11 @@ def marketplace_website(topology: Topology) -> str:
     return next(iter(websites))
 
 
-def marketplace_jwt(topology: Topology, user: str, password: str) -> str:
+def marketplace_jwt(
+    topology: Topology, user: str, password: str, override: bool = False
+) -> str:
     """Log in at the marketplace of the topology and return a token for the buyer."""
-    website = marketplace_website(topology)
+    website = marketplace_website(topology, override)
     print(f"    requesting a JWT for {user} at {website}")
     script = topology.root / "marketplace" / "tools" / "get-jwt.sh"
     if not script.is_file():
@@ -799,6 +810,122 @@ def marketplace_jwt(topology: Topology, user: str, password: str) -> str:
     if result.returncode != 0 or not token:
         raise TestFailure(f"the marketplace login failed: {result.stderr.strip()}")
     return token
+
+
+# --------------------------------------------------------------------------------------
+# The marketplace override and the fixed address of the path manager API
+# --------------------------------------------------------------------------------------
+
+# What the sender logs when it buys from the marketplace HUMMINGBIRD_MARKETPLACE_ADDRESS names.
+OVERRIDE_PURCHASE = re.compile(
+    r"Hummingbird: buying the reservation for \S+ from the marketplace at (\S+), set by "
+    r"HUMMINGBIRD_MARKETPLACE_ADDRESS"
+)
+
+
+def marketplace_api_address(topology: Topology) -> str:
+    """The `scion_api_addr` of the one marketplace.toml of the generated topology."""
+    found: set[str] = set()
+    for path in sorted((topology.root / "gen").glob("AS*/marketplace.toml")):
+        match = re.search(r'^scion_api_addr\s*=\s*"([^"]+)"', path.read_text(), re.MULTILINE)
+        if match:
+            found.add(match.group(1))
+    if len(found) != 1:
+        raise TestFailure(
+            f"expected exactly one marketplace.toml with a scion_api_addr in "
+            f"{topology.root / 'gen'}, found {sorted(found) or 'none'}"
+        )
+    return next(iter(found))
+
+
+def check_marketplace_override(log: Path, address: str) -> None:
+    """Fail unless the sender bought from the overridden marketplace, and only from it."""
+    purchases = set(OVERRIDE_PURCHASE.findall(log.read_text(errors="replace")))
+    if not purchases:
+        raise TestFailure(
+            f"the sender never logged buying from the marketplace at {address} "
+            f"(HUMMINGBIRD_MARKETPLACE_ADDRESS); see {log}"
+        )
+    if purchases != {address}:
+        raise TestFailure(f"the sender bought from {sorted(purchases)}, expected only {address}")
+    print(f"    reservations bought from the marketplace at {address}")
+
+
+def metrics_answer(topology: Topology, endpoint: Endpoint, address: str) -> str:
+    """The first line the path manager API of an endpoint answers to GET /metrics."""
+    host, _, port = address.rpartition(":")
+    host = host.strip("[]")
+    if host in ("", "0.0.0.0", "::"):
+        host = "127.0.0.1"
+    result = topology.shell(
+        endpoint.service,
+        f"exec 3<>/dev/tcp/{host}/{port} && printf 'GET /metrics HTTP/1.0\\r\\n\\r\\n' >&3"
+        f" && head -n 1 <&3",
+        capture_output=True,
+        check=False,
+    )
+    return result.stdout.strip()
+
+
+def check_path_api(topology: Topology, endpoint: Endpoint, address: str) -> None:
+    """Fail unless the API answers on exactly the address SCION_PATH_API_ADDRESS gave."""
+    answer = metrics_answer(topology, endpoint, address)
+    if " 200 " not in answer:
+        raise TestFailure(
+            f"{endpoint.service} does not serve /metrics on {address}; it answered {answer!r}"
+        )
+    print(f"    /metrics answers on {address}: {answer}")
+    # No fallback ports: the default, if it differs, must stay unserved.
+    if not address.endswith(":28015") and metrics_answer(
+        topology, endpoint, "127.0.0.1:28015"
+    ):
+        raise TestFailure(f"{endpoint.service} also serves its API on the default port 28015")
+
+
+def expect_duplicate_rejected(
+    topology: Topology, endpoint: Endpoint, address: str, log_dir: Path
+) -> None:
+    """Fail unless a second instance on the same address cannot open its SCION bind."""
+    log = log_dir / f"wireguard-duplicate-{endpoint.ia.replace(':', '_')}.log"
+    process = topology.exec_background(
+        endpoint.service,
+        ["/share/bin/wireguard-go", "-f", DUPLICATE_INTERFACE],
+        env=wireguard_env(endpoint, None, address),
+        log=log,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while topology.shell(
+            endpoint.service, f"ip link show {DUPLICATE_INTERFACE}", check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode != 0:
+            if time.monotonic() >= deadline:
+                raise TestFailure(f"the duplicate instance never created {DUPLICATE_INTERFACE}")
+            time.sleep(0.5)
+        # The bind is opened when the device comes up.
+        topology.shell(
+            endpoint.service, f"ip link set up dev {DUPLICATE_INTERFACE}",
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        while True:
+            text = log.read_text(errors="replace")
+            if "SCION_PATH_API_ADDRESS" in text and address in text:
+                print(f"    the duplicate instance on {address} was refused")
+                return
+            if time.monotonic() >= deadline:
+                raise TestFailure(
+                    f"the second instance on {address} did not fail naming the address and "
+                    f"SCION_PATH_API_ADDRESS; see {log}"
+                )
+            time.sleep(0.5)
+    finally:
+        process.terminate()
+        topology.shell(
+            endpoint.service,
+            f"pkill -f '[w]ireguard-go -f {DUPLICATE_INTERFACE}' >/dev/null 2>&1;"
+            f" ip link del dev {DUPLICATE_INTERFACE} >/dev/null 2>&1; true",
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
 
 # --------------------------------------------------------------------------------------
@@ -1092,7 +1219,11 @@ def install_binary(topology: Topology, endpoint: Endpoint, binary: Path) -> None
     topology.shell(endpoint.service, "chmod 0755 /share/bin/wireguard-go", check=True)
 
 
-def wireguard_env(endpoint: Endpoint, hummingbird: dict[str, str] | None) -> dict[str, str]:
+def wireguard_env(
+    endpoint: Endpoint,
+    hummingbird: dict[str, str] | None,
+    api_address: str | None = None,
+) -> dict[str, str]:
     """The environment one WireGuard instance is started with."""
     env = {
         "USE_SCION": "1",
@@ -1103,6 +1234,8 @@ def wireguard_env(endpoint: Endpoint, hummingbird: dict[str, str] | None) -> dic
         "SCION_LOCAL_IA": endpoint.scion_address,
         "WG_PROCESS_FOREGROUND": "1",
     }
+    if api_address:
+        env["SCION_PATH_API_ADDRESS"] = api_address
     env.update(hummingbird or {})
     return env
 
@@ -1183,6 +1316,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="hop predicates, as in `scion showpaths --sequence`, that the sender's path to "
         "the marketplace must match; the test then checks that the sender used it. Needs "
         "--hummingbird and a marketplace outside the sending AS",
+    )
+    parser.add_argument(
+        "--marketplace-override",
+        action="store_true",
+        help="buy every reservation from the marketplace named by "
+        "HUMMINGBIRD_MARKETPLACE_ADDRESS (the scion_api_addr of its marketplace.toml) instead "
+        "of the one the path advertises, and check the sender did. Works on any topology; on "
+        "one generated with --no-marketplace-metainfo it proves the Notes are not consulted. "
+        "Needs --hummingbird",
+    )
+    parser.add_argument(
+        "--path-api-address",
+        default=None,
+        metavar="HOST:PORT",
+        help="start the sender with SCION_PATH_API_ADDRESS set to this, e.g. :28016, check "
+        "that its /metrics answers exactly there, and that a second instance in the same "
+        "container on the same address fails to start",
     )
     parser.add_argument(
         "--handshake-timeout",
@@ -1280,7 +1430,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "HUMMINGBIRD_BANDWIDTH": args.bandwidth,
             "HUMMINGBIRD_DURATION": args.duration,
             "SCION_MARKETPLACE_JWT": marketplace_jwt(
-                topology, args.marketplace_user, args.marketplace_password
+                topology, args.marketplace_user, args.marketplace_password,
+                args.marketplace_override,
             ),
             # The marketplaces of a local topology serve a self-signed certificate.
             "HUMMINGBIRD_MARKETPLACE_INSECURE": "1",
@@ -1297,9 +1448,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             hummingbird["HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER"] = (
                 args.path_to_marketplace_filter
             )
-    elif args.path_to_marketplace_filter or args.partial or args.expect_flyovers:
+        if args.marketplace_override:
+            # The TCP form of the address needs its scheme, as in hummbwtester's override.
+            marketplace_address = "https://" + marketplace_api_address(topology)
+            hummingbird["HUMMINGBIRD_MARKETPLACE_ADDRESS"] = marketplace_address
+    elif (
+        args.path_to_marketplace_filter
+        or args.partial
+        or args.expect_flyovers
+        or args.marketplace_override
+    ):
         raise TestFailure(
-            "--path-to-marketplace-filter, --partial and --expect-flyovers need --hummingbird"
+            "--path-to-marketplace-filter, --partial, --expect-flyovers and "
+            "--marketplace-override need --hummingbird"
         )
 
     if args.expect == "partial-empty" and not (args.hummingbird and args.partial):
@@ -1330,7 +1491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_private, source_public = generate_keypair()
         dest_private, dest_public = generate_keypair()
         processes.append(
-            start_wireguard(topology, source, wireguard_env(source, hummingbird), args.mtu, log_dir)
+            start_wireguard(topology, source, wireguard_env(source, hummingbird, args.path_api_address), args.mtu, log_dir)
         )
         processes.append(
             start_wireguard(topology, dest, wireguard_env(dest, None), args.mtu, log_dir)
@@ -1349,6 +1510,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print("== waiting for the tunnel to carry traffic")
         wait_for_tunnel(topology, source, dest, args.handshake_timeout)
+        if args.path_api_address:
+            print("== checking the fixed address of the path manager API")
+            check_path_api(topology, source, args.path_api_address)
+            expect_duplicate_rejected(topology, source, args.path_api_address, log_dir)
+            check_path_api(topology, source, args.path_api_address)  # the first one is unharmed
         if args.path_filter:
             print("== checking that the sender filtered its paths to the receiver")
             check_path_filter(wireguard_log(log_dir, source), dest)
@@ -1369,6 +1535,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.reservation_timeout,
                 args.marketplace_user,
             )
+            if args.marketplace_override:
+                print("== checking that the reservation came from the overridden marketplace")
+                check_marketplace_override(wireguard_log(log_dir, source), marketplace_address)
             if args.path_to_marketplace_filter:
                 print("== checking that the marketplace was reached over the filtered path")
                 check_marketplace_path(wireguard_log(log_dir, source))

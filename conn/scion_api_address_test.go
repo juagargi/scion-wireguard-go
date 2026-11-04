@@ -117,13 +117,25 @@ func TestPathManagerAPIAddressReopen(t *testing.T) {
 }
 
 func TestParseMarketplaceAddress(t *testing.T) {
-	for _, ok := range []string{"[71-2:0:5c,127.0.0.1]:31888", "127.0.0.1:8443", "https://host:8443"} {
+	for _, ok := range []string{"[71-2:0:5c,127.0.0.1]:31888",
+		"https://127.0.0.1:8443",
+		"http://host:8443/x"} {
 		if err := ParseMarketplaceAddress(ok); err != nil {
 			t.Errorf("%q rejected: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"nonsense", "host", "host:0", "[xx,127.0.0.1]:31888",
-		"[71-2:0:5c,]:31888", "[71-2:0:5c,127.0.0.1]", "a b:80", ":80"} {
+	for _, bad := range []string{"nonsense",
+		"host",
+		"host:8443",
+		"127.0.0.1:8443",
+		"ftp://host:21",
+		"https://host:0",
+		"[127.0.0.1]:80",
+		"[xx,127.0.0.1]:31888",
+		"[71-2:0:5c,]:31888",
+		"[71-2:0:5c,127.0.0.1]",
+		"a b:80",
+		":80"} {
 		if err := ParseMarketplaceAddress(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

@@ -121,15 +121,22 @@ const (
 )
 
 // ParseMarketplaceAddress validates the address of a marketplace: either a SCION address
-// [ISD-AS,host]:port, or a host:port reachable over TCP, each optionally with a scheme.
+// [ISD-AS,host]:port, or an http:// or https:// URL, which is reached over TCP.
+// A bare host:port is rejected: the marketplace client needs the scheme to reach it.
 func ParseMarketplaceAddress(raw string) error {
-	if raw != strings.TrimSpace(raw) || strings.ContainsAny(raw, " \t") {
+	if strings.ContainsAny(raw, " \t\r\n") {
 		return fmt.Errorf("address %q contains whitespace", raw)
 	}
-	if _, rest, ok := strings.Cut(raw, "://"); ok {
-		raw = rest
+	hostPort := raw
+	if scheme, rest, ok := strings.Cut(raw, "://"); ok {
+		if scheme != "http" && scheme != "https" {
+			return fmt.Errorf("unsupported scheme %q in %q", scheme, raw)
+		}
+		hostPort, _, _ = strings.Cut(rest, "/")
+	} else if !strings.HasPrefix(raw, "[") {
+		return fmt.Errorf("address %q is neither a SCION address [ISD-AS,host]:port nor "+
+			"an http(s):// URL", raw)
 	}
-	hostPort, _, _ := strings.Cut(raw, "/")
 	host, port, err := net.SplitHostPort(hostPort)
 	if err != nil {
 		return err
@@ -147,6 +154,8 @@ func ParseMarketplaceAddress(raw string) error {
 		if ip == "" {
 			return fmt.Errorf("missing host in SCION address %q", raw)
 		}
+	} else if !strings.Contains(raw, "://") {
+		return fmt.Errorf("SCION address %q lacks the ISD-AS: expected [ISD-AS,host]:port", raw)
 	}
 	return nil
 }

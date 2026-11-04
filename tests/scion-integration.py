@@ -87,6 +87,22 @@ TESTS: dict[str, Case] = {
             "--expect-flyovers", "1-ff00:0:111,1-ff00:0:110,1-ff00:0:112",
         ],
     ),
+    "marketplace-override": Case(
+        # Works on any tiny topology. Generated with --no-marketplace-metainfo, no path
+        # advertises the marketplace, so the purchase can only succeed through the override.
+        help="reservations bought from the marketplace named by HUMMINGBIRD_MARKETPLACE_ADDRESS",
+        args=[
+            "--hummingbird",
+            "--marketplace-override",
+            "--size", "10M",
+            "--expect-flyovers", "1-ff00:0:111,1-ff00:0:110,1-ff00:0:112",
+        ],
+    ),
+    "path-api-address": Case(
+        help="SCION_PATH_API_ADDRESS pins the path manager API to one address, and a second "
+        "instance on it fails to start",
+        args=["--path-api-address", ":28016", "--size", "10M"],
+    ),
     "filters": Case(
         # From 1-ff00:0:112 the marketplace in 1-ff00:0:111 is remote, so both filters
         # apply: each names every hop of the only path through the core AS.

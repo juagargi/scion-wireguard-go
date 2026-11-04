@@ -59,8 +59,8 @@ so only the JWT authenticating this client is configured.
   Use it to keep the marketplace traffic off the reserved interfaces (default: the
   daemon's first path)
 * `HUMMINGBIRD_MARKETPLACE_ADDRESS`: SCION API address of the marketplace every
-  reservation is bought from, e.g. `[71-2:0:5c,127.0.0.1]:31888` (a plain `host:port` is
-  reached over TCP). The Notes of the path are not consulted. Use it where no path
+  reservation is bought from, e.g. `[71-2:0:5c,127.0.0.1]:31888` or an `https://host:port`
+  URL, reached over TCP (a bare `host:port` is rejected). The Notes of the path are not consulted. Use it where no path
   advertises the marketplace, as on SCIERA when its location is overridden; it combines
   with `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`, which still selects the path to it.
   A malformed value is a configuration error; the variable is ignored, with a warning,

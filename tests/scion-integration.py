@@ -65,6 +65,32 @@ TESTS: dict[str, Case] = {
             "--overlap", "8s",
         ],
     ),
+    "path-filter": Case(
+        # The tiny topology has a single path between any two ASes; the filter names
+        # every hop of the one from 1-ff00:0:111 to 1-ff00:0:112, through the core AS.
+        help="traffic and reservations restricted to the paths matching a "
+        "scion_path_filter set through the UAPI",
+        args=[
+            "--hummingbird",
+            "--size", "100M",
+            "--path-filter", "1-ff00:0:111#41 1-ff00:0:110#1,2 1-ff00:0:112#1",
+        ],
+    ),
+    "marketplace-filter": Case(
+        # The marketplace of the tiny topology runs in 1-ff00:0:111, so the sender is
+        # 1-ff00:0:112, whose only path there goes through the core AS. The filter
+        # names every hop of that path.
+        help="reservations bought over a path to the marketplace restricted by "
+        "HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER",
+        args=[
+            "--hummingbird",
+            "--source-ia", "1-ff00:0:112",
+            "--dest-ia", "1-ff00:0:111",
+            "--size", "100M",
+            "--path-to-marketplace-filter",
+            "1-ff00:0:112#1 1-ff00:0:110#2,1 1-ff00:0:111#41",
+        ],
+    ),
 }
 
 
@@ -137,7 +163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     selected = [
-        name for name in TESTS if args.test_all or getattr(args, f"test_{name}")
+        name for name in TESTS if args.test_all or getattr(args, f"test_{name.replace('-', '_')}")
     ]
     if not selected:
         parser.error("select at least one test: " + ", ".join(

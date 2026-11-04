@@ -78,7 +78,10 @@ cd <scion-dir>
 * `tests/scion-integration.py`: checks that the tiny topology is running in
   `--scion-dir`, then runs `scion-end2end.py` once per selected test, e.g.
   `--test-smoke` (best effort, no Hummingbird), `--test-hummingbird` (a transfer
-  spanning several reservation renewals), or `--test-all`.
+  spanning several reservation renewals), `--test-path-filter` (traffic and
+  reservations restricted by a `scion_path_filter`), `--test-marketplace-filter` (reservations
+  bought over a path to the marketplace restricted by
+  `HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER`), or `--test-all`.
 
 ```bash
 ./tests/scion-integration.py --scion-dir <scion-dir> --test-all
@@ -222,6 +225,31 @@ set=1
 scion_path_policy=latency
 EOF
 ```
+
+### Path Filters
+
+The paths to an AS can be restricted to those matching a sequence of hop predicates,
+with the syntax of `scion showpaths --sequence`. Paths that do not match are discarded
+before the path policy ranks the rest, so neither the traffic, nor a path chosen through
+the HTTP API, nor a Hummingbird reservation ever uses them.
+
+```bash
+cat << EOF | socat - UNIX-CONNECT:"$UAPI_SOCKET"
+set=1
+scion_path_filter=1-ff00:0:112 1-ff00:0:111#41 1-ff00:0:110#1,2 1-ff00:0:112#1
+EOF
+```
+
+* Set one filter per AS; setting another one for the same AS replaces it, and
+  `scion_path_filter=<ISD-AS>` alone removes it. `get=1` lists them all.
+* Filters are best set before the peer's `scion_endpoint`, so that no packet ever
+  leaves on another path. A filter set later takes effect right away: if it changes
+  the selected path, the current reservation is dropped and a new one is bought for
+  the new path.
+* When no path matches, there is no fallback: a `scion_endpoint` in that AS is
+  rejected, and packets to it are dropped.
+* A reverse reservation advertised by the peer travels on the path the peer chose,
+  and is used for the replies regardless of the filter.
 
 ## Path Manager HTTP API
 

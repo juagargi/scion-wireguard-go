@@ -18,6 +18,7 @@ import (
 	"github.com/scionproto/scion/pkg/daemon"
 	"github.com/scionproto/scion/pkg/snet"
 	snetpath "github.com/scionproto/scion/pkg/snet/path"
+	"github.com/scionproto/scion/private/path/pathpol"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
@@ -41,6 +42,10 @@ type ScionNetBind struct {
 
 	// Path management
 	pathManager *PathManager
+
+	// pathFilters are kept here rather than only in the path manager, which is
+	// recreated every time the bind is opened.
+	pathFilters map[addr.IA]*pathpol.Sequence
 
 	// replyPather is the single, canonical reply pather shared by every receive
 	// path (both the batch conn and the fallback snet.Conn). It is always a
@@ -224,6 +229,7 @@ func (s *ScionNetBind) initSCION() error {
 		WithRefreshInterval(5*time.Minute),
 		WithTopology(topo),
 		WithHummingbird(s.config.Hummingbird),
+		WithPathFilters(s.pathFilters),
 	)
 	s.logger.Verbosef("SCION network initialized with IA %s", s.config.LocalIA)
 
@@ -486,6 +492,9 @@ func (s *ScionNetBind) Send(bufs [][]byte, ep Endpoint) error {
 			// the path from the best-effort pool here would silently drop the reservation.
 		} else if p, err := connData.pathManager.GetPath(ia); err == nil {
 			scionEp.setPath(p.Dataplane(), p.UnderlayNextHop())
+		} else if connData.pathManager.HasPathFilter(ia) {
+			// The path the endpoint still holds may be one the filter excludes.
+			return fmt.Errorf("no path to %s matches its path filter: %w", ia, err)
 		}
 	}
 
@@ -576,6 +585,38 @@ func (s *ScionNetBind) SetPathPolicy(policy string) {
 	if pathManager != nil {
 		pathManager.SetPolicy(policy)
 	}
+}
+
+// SetPathFilter restricts the paths to ia to those matching sequence, or lifts the
+// restriction when sequence is nil. It also applies to the reservations to ia.
+func (s *ScionNetBind) SetPathFilter(ia addr.IA, sequence *pathpol.Sequence) error {
+	s.mu.Lock()
+	if sequence == nil {
+		delete(s.pathFilters, ia)
+	} else {
+		if s.pathFilters == nil {
+			s.pathFilters = make(map[addr.IA]*pathpol.Sequence)
+		}
+		s.pathFilters[ia] = sequence
+	}
+	pathManager := s.cachedConnData.pathManager
+	s.mu.Unlock()
+
+	if pathManager != nil {
+		return pathManager.SetPathFilter(ia, sequence)
+	}
+	return nil
+}
+
+// PathFilters returns a copy of the path filters, by destination.
+func (s *ScionNetBind) PathFilters() map[addr.IA]*pathpol.Sequence {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	filters := make(map[addr.IA]*pathpol.Sequence, len(s.pathFilters))
+	for ia, sequence := range s.pathFilters {
+		filters[ia] = sequence
+	}
+	return filters
 }
 
 func (e *ScionNetEndpoint) GetScionAddr() *snet.UDPAddr {

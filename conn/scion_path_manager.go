@@ -24,6 +24,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/snet"
 	snetpath "github.com/scionproto/scion/pkg/snet/path"
+	"github.com/scionproto/scion/private/path/pathpol"
 )
 
 // refreshInterval is the default cadence at which the manager re‑resolves
@@ -81,6 +82,9 @@ type PathManager struct {
 	cache map[addr.IA]*PathCacheEntry
 	log   Logger
 
+	// filters restrict the paths to a destination to those matching its sequence.
+	filters map[addr.IA]*pathpol.Sequence
+
 	refresh    time.Duration
 	httpServer *http.Server // Added for the API server
 
@@ -97,6 +101,7 @@ func NewPathManager(d daemon.Connector, localIA addr.IA, pol PathPolicy, log Log
 		localIA: localIA,
 		policy:  pol,
 		cache:   make(map[addr.IA]*PathCacheEntry),
+		filters: make(map[addr.IA]*pathpol.Sequence),
 		log:     log,
 		refresh: refreshInterval,
 	}
@@ -126,6 +131,16 @@ func WithRefreshInterval(d time.Duration) PathManagerOption {
 // manager only resolves plain SCION paths.
 func WithHummingbird(cfg HummingbirdConfig) PathManagerOption {
 	return func(pm *PathManager) { pm.humm = cfg }
+}
+
+// WithPathFilters restricts the paths to every destination in filters to those
+// matching its sequence.
+func WithPathFilters(filters map[addr.IA]*pathpol.Sequence) PathManagerOption {
+	return func(pm *PathManager) {
+		for ia, sequence := range filters {
+			pm.filters[ia] = sequence
+		}
+	}
 }
 
 // WithTopology provides the local topology, which the marketplace client needs
@@ -289,6 +304,16 @@ func (pm *PathManager) refreshOne(dest addr.IA) error {
 		pm.log.Verbosef("No paths found from %s to %s", pm.localIA, dest)
 	}
 
+	pm.mu.RLock()
+	filter := pm.filters[dest]
+	pm.mu.RUnlock()
+	if filter != nil {
+		total := len(paths)
+		paths = filter.Eval(paths)
+		pm.log.Verbosef("Path filter for %s: %d of %d paths match %q",
+			dest, len(paths), total, filter.String())
+	}
+
 	// Create path ranks
 	ranks := make([]PathRank, len(paths))
 	for i, path := range paths {
@@ -373,13 +398,73 @@ func (pm *PathManager) refreshOne(dest addr.IA) error {
 	entry.LastRefresh = time.Now()
 	entry.LastError = nil
 
-	if pm.humm.Enabled && entry.CancelRenewal == nil && len(paths) > 0 {
+	pm.startRenewalLocked(dest, entry)
+
+	return nil
+}
+
+// startRenewalLocked starts keeping a reservation to dest, unless that is already
+// going on or there is no path to buy it for. The caller holds pm.mu.
+func (pm *PathManager) startRenewalLocked(dest addr.IA, entry *PathCacheEntry) {
+	if pm.humm.Enabled && entry.CancelRenewal == nil && len(entry.Paths) > 0 {
 		ctx, cancel := context.WithCancel(pm.ctx)
 		entry.CancelRenewal = cancel
 		go pm.reservationRenewalLoop(ctx, dest)
 	}
+}
 
+// SetPathFilter restricts the paths to dest to those matching sequence,
+// or lifts the restriction when sequence is nil.
+// A destination already in use gets its paths again right away. If that changes the
+// selected path, its reservation, bought for the old path, is dropped and a new one
+// is bought for the new path.
+func (pm *PathManager) SetPathFilter(dest addr.IA, sequence *pathpol.Sequence) error {
+	pm.mu.Lock()
+	if sequence == nil {
+		delete(pm.filters, dest)
+	} else {
+		pm.filters[dest] = sequence
+	}
+	_, tracked := pm.cache[dest]
+	before := selectedFingerprint(pm.cache[dest])
+	pm.mu.Unlock()
+
+	if !tracked {
+		return nil
+	}
+	if err := pm.refreshOne(dest); err != nil {
+		return err
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	entry := pm.cache[dest]
+	if entry == nil || selectedFingerprint(entry) == before || entry.CancelRenewal == nil {
+		return nil
+	}
+	pm.log.Verbosef("Selected path to %s changed, renewing its Hummingbird reservation", dest)
+	entry.CancelRenewal()
+	entry.CancelRenewal = nil
+	entry.ForwardReservation = nil
+	entry.ReservationNextHop = nil
+	entry.PendingReverseExtn = nil
+	pm.startRenewalLocked(dest, entry)
 	return nil
+}
+
+// HasPathFilter reports whether the paths to dest are restricted by a filter.
+func (pm *PathManager) HasPathFilter(dest addr.IA) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.filters[dest] != nil
+}
+
+// selectedFingerprint identifies the path selected in entry, empty without one.
+func selectedFingerprint(entry *PathCacheEntry) string {
+	if entry == nil || entry.SelectedIndex < 0 || entry.SelectedIndex >= len(entry.Paths) {
+		return ""
+	}
+	return snet.Fingerprint(entry.Paths[entry.SelectedIndex].Metadata().Interfaces).String()
 }
 
 // Reservation purchase constants.
@@ -462,7 +547,7 @@ func (pm *PathManager) reservationRenewalLoop(ctx context.Context, dest addr.IA)
 		if !sleepUntil(ctx, handoverAt) {
 			return
 		}
-		pm.installReservation(dest, rsv, nextHop)
+		pm.installReservation(ctx, dest, rsv, nextHop)
 
 		pm.log.Verbosef("Hummingbird reservation for %s in use, expires at %s", dest, expiry)
 		requestAt, handoverAt, startAt = renewalSchedule(expiry,
@@ -531,7 +616,7 @@ func (pm *PathManager) buyReservation(
 		ctx,
 		path,
 		pm.humm.JWT,
-		pm.humm.marketplaceQuerier(pm.d, pm.localIA),
+		pm.humm.marketplaceQuerier(pm.d, pm.localIA, pm.log),
 		pm.topo,
 		pm.humm.Insecure,
 		marketplace.ReservationRequest{
@@ -554,6 +639,7 @@ func (pm *PathManager) buyReservation(
 
 // installReservation makes rsv the reservation that carries the traffic to dest.
 func (pm *PathManager) installReservation(
+	ctx context.Context,
 	dest addr.IA,
 	rsv *snetpath.Reservation,
 	nextHop *net.UDPAddr,
@@ -566,7 +652,8 @@ func (pm *PathManager) installReservation(
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	entry := pm.cache[dest]
-	if entry == nil {
+	// A cancelled renewal, e.g. after the path changed, must not install what it bought.
+	if entry == nil || ctx.Err() != nil {
 		return
 	}
 	entry.ForwardReservation = rsv

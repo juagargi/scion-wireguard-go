@@ -497,6 +497,36 @@ def configure_peer(
     )
 
 
+def set_path_filter(topology: Topology, endpoint: Endpoint, peer: Endpoint, sequence: str) -> None:
+    """Restrict the paths from endpoint to the AS of peer to those matching sequence."""
+    uapi(topology, endpoint, f"set=1\nscion_path_filter={peer.ia} {sequence}\n\n")
+    # The filter has to be kept, and read back, exactly as it was given.
+    status = uapi(topology, endpoint, "get=1\n\n")
+    expected = f"scion_path_filter={peer.ia} {sequence}"
+    if expected not in status.splitlines():
+        raise TestFailure(
+            f"{endpoint.service} does not report the path filter back; expected "
+            f"{expected!r} in:\n{status}"
+        )
+
+
+# What the sender logs every time it filters its paths to an AS.
+PATH_FILTER = re.compile(r"Path filter for (\S+): (\d+) of (\d+) paths match .*")
+
+
+def check_path_filter(log: Path, dest: Endpoint) -> None:
+    """Fail unless the sender filtered its paths to dest and some path matched."""
+    matches = [
+        found for found in PATH_FILTER.finditer(log.read_text(errors="replace"))
+        if found.group(1) == dest.ia
+    ]
+    if not matches:
+        raise TestFailure(f"the sender never filtered its paths to {dest.ia}")
+    if matches[-1].group(2) == "0":
+        raise TestFailure(f"no path to {dest.ia} matches --path-filter: {matches[-1].group(0)}")
+    print(f"    {matches[-1].group(0).strip()}")
+
+
 def wait_for_tunnel(topology: Topology, source: Endpoint, dest: Endpoint, timeout: float) -> None:
     """Block until a packet makes it through the tunnel, or give up."""
     deadline = time.monotonic() + timeout
@@ -558,6 +588,27 @@ def wait_for_reservation(log: Path, timeout: float, buyer: str) -> None:
         f"reset the balances.\nThe marketplace exchange said:\n  "
         + "\n  ".join(reported[-10:] or ["(nothing about Hummingbird at all)"])
     )
+
+
+# What the sender logs when --path-to-marketplace-filter picked its path to the marketplace.
+MARKETPLACE_PATH = re.compile(r"Path to the marketplace in .* matching .*")
+
+
+def check_marketplace_path(log: Path) -> None:
+    """Fail unless the sender reached the marketplace over a path the filter selected.
+
+    The filter only applies to a marketplace in another AS: one in the sender's own AS
+    is reached without a path, and the filter is then never consulted.
+    """
+    found = MARKETPLACE_PATH.search(log.read_text(errors="replace"))
+    if not found:
+        raise TestFailure(
+            "the sender bought its reservation without selecting the path to the "
+            "marketplace through --path-to-marketplace-filter; is the marketplace in the "
+            "sender's own AS? The marketplace of the tiny topology runs in 1-ff00:0:111, "
+            "so send from another AS with --source-ia"
+        )
+    print(f"    {found.group(0).strip()}")
 
 
 def marketplace_website(topology: Topology) -> str:
@@ -972,6 +1023,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--marketplace-user", default=DEFAULT_MARKETPLACE_USER)
     parser.add_argument("--marketplace-password", default=DEFAULT_MARKETPLACE_PASSWORD)
     parser.add_argument(
+        "--path-filter",
+        default=None,
+        metavar="SEQUENCE",
+        help="hop predicates, as in `scion showpaths --sequence`, that the sender's paths "
+        "to the receiver must match, set through the UAPI key scion_path_filter. Both the "
+        "traffic and, with --hummingbird, the reservations use only those paths",
+    )
+    parser.add_argument(
+        "--path-to-marketplace-filter",
+        default=None,
+        metavar="SEQUENCE",
+        help="hop predicates, as in `scion showpaths --sequence`, that the sender's path to "
+        "the marketplace must match; the test then checks that the sender used it. Needs "
+        "--hummingbird and a marketplace outside the sending AS",
+    )
+    parser.add_argument(
         "--handshake-timeout",
         type=float,
         default=120,
@@ -1048,6 +1115,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             hummingbird["HUMMINGBIRD_RENEWAL_AHEAD"] = args.renewal_ahead
         if args.overlap:
             hummingbird["HUMMINGBIRD_RESERVATION_OVERLAP"] = args.overlap
+        if args.path_to_marketplace_filter:
+            hummingbird["HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER"] = (
+                args.path_to_marketplace_filter
+            )
+    elif args.path_to_marketplace_filter:
+        raise TestFailure("--path-to-marketplace-filter needs --hummingbird")
 
     processes: list[subprocess.Popen] = []
     try:
@@ -1068,11 +1141,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         processes.append(
             start_wireguard(topology, dest, wireguard_env(dest, None), args.mtu, log_dir)
         )
+        if args.path_filter:
+            # Before the peer, so that not even the first path to it ignores the filter.
+            set_path_filter(topology, source, dest, args.path_filter)
         configure_peer(topology, source, source_private, dest_public, dest)
         configure_peer(topology, dest, dest_private, source_public, source)
 
         print("== waiting for the tunnel to carry traffic")
         wait_for_tunnel(topology, source, dest, args.handshake_timeout)
+        if args.path_filter:
+            print("== checking that the sender filtered its paths to the receiver")
+            check_path_filter(wireguard_log(log_dir, source), dest)
 
         if hummingbird is not None:
             print("== checking that the traffic really rides on a reservation")
@@ -1081,6 +1160,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.reservation_timeout,
                 args.marketplace_user,
             )
+            if args.path_to_marketplace_filter:
+                print("== checking that the marketplace was reached over the filtered path")
+                check_marketplace_path(wireguard_log(log_dir, source))
 
         print("== transferring the payload through the tunnel")
         rate = resolve_bwlimit(args.bwlimit, args.bandwidth, hummingbird is not None)

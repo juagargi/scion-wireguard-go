@@ -139,11 +139,15 @@ func (c HummingbirdConfig) Validate() error {
 
 // marketplaceQuerier returns the querier the marketplace client looks up its path with:
 // the daemon's paths as they are, or only the first one matching cfg.PathToMarketplace.
-func (c HummingbirdConfig) marketplaceQuerier(d daemon.Connector, local addr.IA) snet.PathQuerier {
+func (c HummingbirdConfig) marketplaceQuerier(
+	d daemon.Connector,
+	local addr.IA,
+	log Logger,
+) snet.PathQuerier {
 	if c.PathToMarketplace == nil {
 		return daemon.Querier{Connector: d, IA: local}
 	}
-	return sequenceQuerier{d: d, local: local, sequence: c.PathToMarketplace}
+	return sequenceQuerier{d: d, local: local, sequence: c.PathToMarketplace, log: log}
 }
 
 // sequenceQuerier returns only the first path of the daemon matching the sequence.
@@ -152,6 +156,7 @@ type sequenceQuerier struct {
 	d        daemon.Connector
 	local    addr.IA
 	sequence *pathpol.Sequence
+	log      Logger // optional, reports the selected path
 }
 
 func (q sequenceQuerier) Query(ctx context.Context, dst addr.IA) ([]snet.Path, error) {
@@ -163,6 +168,11 @@ func (q sequenceQuerier) Query(ctx context.Context, dst addr.IA) ([]snet.Path, e
 			return nil, fmt.Errorf("querying paths from %s to %s: %w", q.local, dst, err)
 		}
 		if matching := q.sequence.Eval(paths); len(matching) > 0 {
+			if q.log != nil {
+				hops, _ := pathpol.GetSequence(matching[0])
+				q.log.Verbosef("Path to the marketplace in %s matching %q: %s",
+					dst, q.sequence.String(), hops)
+			}
 			return matching[:1], nil
 		}
 	}

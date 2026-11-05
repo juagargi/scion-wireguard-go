@@ -1,0 +1,490 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "experiment.schema.json",
+  "title": "wireguard-go over SCION/Hummingbird experiment",
+  "description": "One self-contained experiment for tests/experiment/experiment.py: WireGuard tunnels between SCION end hosts, the workloads that run through them, and the deployment they run on. The hummingbird, deployment and tc sections have the same shape as in tools/hummbwtester of the SCION repository, whose setup steps the runner reuses.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tunnels", "workloads", "deployment"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "informative": {
+      "description": "Free text printed at the start of setup, e.g. an ASCII sketch of the topology. Never interpreted.",
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "name": {
+      "description": "Name of the experiment; the experiment label of every metric. Defaults to the file name without extension.",
+      "$ref": "#/$defs/id"
+    },
+    "hummingbird": {
+      "description": "Where the Hummingbird endpoints buy their reservations. Required as soon as one tunnel endpoint has a hummingbird reservation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["marketplace"],
+      "properties": {
+        "marketplace": {"$ref": "#/$defs/marketplace"},
+        "marketplace_insecure": {
+          "description": "HUMMINGBIRD_MARKETPLACE_INSECURE for every Hummingbird endpoint: skip the certificate validation of the marketplace. The generated Docker topology needs it. Kept out of hummingbird.marketplace, which hummbwtester's parser reads and which rejects unknown fields.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "tunnels": {
+      "description": "The WireGuard tunnels. Each one connects exactly two endpoints with one wireguard-go instance per endpoint.",
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/tunnel"}
+    },
+    "workloads": {
+      "description": "The traffic that runs through the tunnels. The run ends when every primary workload has finished; background workloads are stopped then.",
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/workload"}
+    },
+    "run": {"$ref": "#/$defs/run"},
+    "monitoring": {"$ref": "#/$defs/monitoring"},
+    "deployment": {
+      "oneOf": [
+        {"$ref": "#/$defs/docker_deployment"},
+        {"$ref": "#/$defs/ssh_deployment"}
+      ]
+    },
+    "tc": {"$ref": "#/$defs/tc"}
+  },
+  "$defs": {
+    "id": {
+      "description": "An identifier that is also used as a Prometheus label value and in file names.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "isd_as": {
+      "type": "string",
+      "pattern": "^[0-9]+-([0-9]+|[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4})$"
+    },
+    "bandwidth": {
+      "description": "A bandwidth as wireguard-go and hummbwtester read it, e.g. 5mbps or 950Mbps.",
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)?[kKmMgG]bps$"
+    },
+    "duration": {
+      "description": "A Go duration, e.g. 30s, 5m or -5s.",
+      "type": "string",
+      "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
+    },
+    "size": {
+      "description": "A size with a binary unit, e.g. 1GiB.",
+      "type": "string",
+      "pattern": "^[0-9]+(B|KiB|MiB|GiB|TiB)$"
+    },
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "host_port": {
+      "description": "host:port, with IPv6 hosts in brackets.",
+      "type": "string",
+      "pattern": "^(\\[[0-9a-fA-F:.%A-Za-z]+\\]|[A-Za-z0-9.-]+):[0-9]{1,5}$"
+    },
+    "ip": {
+      "type": "string",
+      "anyOf": [{"format": "ipv4"}, {"format": "ipv6"}]
+    },
+    "sequence": {
+      "description": "A SCION hop-predicate sequence, as in `scion showpaths --sequence`. Validated by the runner with wireguard-go's own parser.",
+      "type": "string",
+      "minLength": 1
+    },
+    "tc_value": {
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)?([bB]it|[kKmMgG]bit|b|kb|mb|gb|ms|us|s)?$"
+    },
+
+    "marketplace": {
+      "description": "Exactly hummingbird.marketplace of hummbwtester; the runner validates it with hummbwtester's parse_marketplace_config (no extra fields).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["username", "password_env", "location_override"],
+      "properties": {
+        "host": {
+          "description": "SSH only: the deployment.hosts entry setup deploys the marketplace on.",
+          "type": "string"
+        },
+        "scion_address": {
+          "description": "SCION API address of the marketplace, [ISD-AS,IP]:port. Required with location_override and for SSH deployments.",
+          "type": "string",
+          "pattern": "^\\[[0-9]+-[0-9a-fA-F:]+,[^\\]]+\\]:[0-9]{1,5}$"
+        },
+        "username": {"type": "string", "minLength": 1},
+        "password_env": {
+          "description": "Environment variable on the controller that holds the marketplace password.",
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "sub_account": {"type": "string"},
+        "location_override": {
+          "description": "true: buy from scion_address (HUMMINGBIRD_MARKETPLACE_ADDRESS), ignoring the marketplaces the path advertises. false: buy from the marketplace the path advertises in its static info Note.",
+          "type": "boolean"
+        },
+        "interfaces": {
+          "description": "SSH only: ISD-AS -> interface IDs the marketplace sells assets for, 0 for flyovers starting or ending in the AS. Absent sells every pair.",
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/isd_as"},
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 0}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"location_override": {"const": true}}},
+          "then": {"required": ["scion_address"]}
+        }
+      ]
+    },
+
+    "reservation": {
+      "description": "The Hummingbird reservations the endpoint buys for its traffic to the peer. Field names follow hummbwtester; each maps to one HUMMINGBIRD_* variable of wireguard-go.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bandwidth", "duration"],
+      "properties": {
+        "bandwidth": {"$ref": "#/$defs/bandwidth", "description": "HUMMINGBIRD_BANDWIDTH"},
+        "duration": {"$ref": "#/$defs/duration", "description": "HUMMINGBIRD_DURATION, the lifetime of one reservation"},
+        "reverse_bandwidth": {"$ref": "#/$defs/bandwidth", "description": "HUMMINGBIRD_REVERSE_BANDWIDTH; absent reserves one direction only"},
+        "renewal_ahead": {"$ref": "#/$defs/duration", "description": "HUMMINGBIRD_RENEWAL_AHEAD"},
+        "reservation_overlap": {"$ref": "#/$defs/duration", "description": "HUMMINGBIRD_RESERVATION_OVERLAP"},
+        "humm_start_offset": {"$ref": "#/$defs/duration", "description": "HUMMINGBIRD_START_OFFSET"},
+        "partial": {
+          "description": "HUMMINGBIRD_PARTIAL: comma-separated ISD-ASes to reserve in, or !ISD-AS to leave out.",
+          "type": "string",
+          "minLength": 1
+        },
+        "path_to_marketplace_filter": {"$ref": "#/$defs/sequence", "description": "HUMMINGBIRD_PATH_TO_MARKETPLACE_FILTER"},
+        "max_price": {"type": "integer", "minimum": 0, "description": "HUMMINGBIRD_MAX_PRICE"}
+      }
+    },
+
+    "endpoint": {
+      "description": "One side of a tunnel: one wireguard-go instance.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "isd_as", "listen_port", "tunnel_ip", "api_port"],
+      "properties": {
+        "name": {
+          "description": "Unique across the whole experiment; workloads name endpoints by it.",
+          "$ref": "#/$defs/id"
+        },
+        "node": {
+          "description": "SSH only, and required there: the deployment.hosts entry the instance runs on. Docker places it in the tester container of isd_as.",
+          "type": "string"
+        },
+        "isd_as": {"$ref": "#/$defs/isd_as"},
+        "host": {
+          "description": "The IP the SCION bind uses (SCION_LOCAL_IA is isd_as,host). Docker: optional, discovered with `scion address`. SSH: required.",
+          "$ref": "#/$defs/ip"
+        },
+        "listen_port": {
+          "description": "WireGuard's SCION/UDP port; must be inside the dispatched_ports of the AS. Unique per host.",
+          "$ref": "#/$defs/port"
+        },
+        "interface": {
+          "description": "Name of the TUN device. Defaults to wgx-<tunnel id>; at most 15 characters. Setup and teardown only ever touch devices named wgx-*.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,15}$"
+        },
+        "tunnel_ip": {
+          "description": "The address of this side inside the tunnel. Both sides of a tunnel share one prefix of tunnel.prefix_len.",
+          "$ref": "#/$defs/ip"
+        },
+        "api_port": {
+          "description": "Port of the path manager API, which also serves /metrics (SCION_PATH_API_ADDRESS). Unique per host.",
+          "$ref": "#/$defs/port"
+        },
+        "api_bind": {
+          "description": "Address the API binds to. Defaults to 0.0.0.0 on Docker, where Prometheus scrapes the container IP, and to 127.0.0.1 on SSH hosts, where the API must not be exposed.",
+          "$ref": "#/$defs/ip"
+        },
+        "path_filter": {"$ref": "#/$defs/sequence", "description": "scion_path_filter towards the peer's ISD-AS, set over UAPI"},
+        "path_policy": {"type": "string", "description": "SCION_PATH_POLICY"},
+        "hummingbird": {"$ref": "#/$defs/reservation"},
+        "env": {
+          "description": "Extra environment variables for this wireguard-go instance. Overrides what the runner derives; meant for experiments, not for secrets.",
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+
+    "tunnel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "endpoints"],
+      "properties": {
+        "id": {
+          "description": "Tunnel label of every metric. At most 11 characters, so that the default interface name wgx-<id> fits.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,11}$"
+        },
+        "endpoints": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/endpoint"}
+        },
+        "prefix_len": {"type": "integer", "minimum": 8, "maximum": 30, "default": 24},
+        "mtu": {
+          "description": "MTU of both tunnel devices. 1000 fits the longest Hummingbird header of the tiny topology.",
+          "type": "integer",
+          "minimum": 576,
+          "maximum": 9000,
+          "default": 1000
+        },
+        "persistent_keepalive": {"type": "integer", "minimum": 0, "default": 25},
+        "use_batch": {"description": "USE_BATCH", "type": "boolean", "default": true}
+      }
+    },
+
+    "workload_common": {
+      "type": "object",
+      "required": ["id", "kind", "from", "to"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"type": "string"},
+        "from": {"description": "Name of the sending endpoint.", "$ref": "#/$defs/id"},
+        "to": {"description": "Name of the receiving endpoint; the other end of the same tunnel as from.", "$ref": "#/$defs/id"},
+        "role": {
+          "description": "primary workloads decide when the run ends and whether it passed; background workloads only load the network and are stopped once every primary one finished.",
+          "enum": ["primary", "background"],
+          "default": "primary"
+        },
+        "start_delay": {
+          "description": "Wait after the run starts (after run.warmup for primary workloads).",
+          "$ref": "#/$defs/duration",
+          "default": "0s"
+        },
+        "timeout": {
+          "description": "A primary workload that is still running after this fails the run.",
+          "$ref": "#/$defs/duration"
+        }
+      }
+    },
+
+    "workload": {
+      "oneOf": [
+        {"$ref": "#/$defs/file_copy"},
+        {"$ref": "#/$defs/iperf3"},
+        {"$ref": "#/$defs/ping"}
+      ]
+    },
+
+    "file_copy": {
+      "description": "Copy a file through the tunnel with rsync, against an rsync daemon bound to the receiver's tunnel_ip.",
+      "allOf": [{"$ref": "#/$defs/workload_common"}],
+      "unevaluatedProperties": false,
+      "properties": {
+        "kind": {"const": "file_copy"},
+        "size": {
+          "description": "Size of the pseudo-random payload, which is written to disk on both sides.",
+          "$ref": "#/$defs/size"
+        },
+        "verify": {
+          "description": "Compare the sha256 of both copies after each transfer.",
+          "type": "boolean",
+          "default": true
+        },
+        "repeat": {
+          "description": "How many times to copy the file. 0 repeats until the workload is stopped, which only background workloads may do.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 1
+        },
+        "bwlimit": {
+          "description": "rsync --bwlimit. reservation: the bandwidth of the sender's reservation; none: unlimited. Defaults to reservation for a sender with a reservation and none otherwise. WireGuard does not pace, so traffic above the reservation is demoted to best effort by the border routers.",
+          "anyOf": [{"enum": ["reservation", "none"]}, {"$ref": "#/$defs/bandwidth"}]
+        },
+        "keep_files": {
+          "description": "Keep the payload and its copy after the run, e.g. to inspect a failed verification.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": ["size"]
+    },
+
+    "iperf3": {
+      "description": "An iperf3 client at from against an iperf3 server bound to the tunnel_ip of to. The way to generate best-effort load: it needs no disk space, and UDP at a fixed rate does not back off under congestion.",
+      "allOf": [
+        {"$ref": "#/$defs/workload_common"},
+        {
+          "if": {"properties": {"protocol": {"const": "udp"}}, "required": ["protocol"]},
+          "then": {"required": ["bandwidth"]}
+        }
+      ],
+      "unevaluatedProperties": false,
+      "properties": {
+        "kind": {"const": "iperf3"},
+        "protocol": {"enum": ["tcp", "udp"], "default": "tcp"},
+        "bandwidth": {"description": "iperf3 -b. Required for UDP, whose iperf3 default is only 1 Mbit/s; absent is unlimited for TCP.", "$ref": "#/$defs/bandwidth"},
+        "length": {
+          "description": "iperf3 -l: the UDP datagram or TCP write size. For UDP keep it below the tunnel MTU minus 28 bytes of IP and UDP headers, or every datagram is fragmented inside the tunnel. Defaults to tunnel mtu - 100 for UDP.",
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 65507
+        },
+        "duration": {"description": "iperf3 -t; absent runs until stopped (-t 0, background only).", "$ref": "#/$defs/duration"},
+        "parallel": {"type": "integer", "minimum": 1, "default": 1}
+      }
+    },
+
+    "ping": {
+      "description": "ICMP echo through the tunnel; the runner exports RTT, jitter and loss.",
+      "allOf": [{"$ref": "#/$defs/workload_common"}],
+      "unevaluatedProperties": false,
+      "properties": {
+        "kind": {"const": "ping"},
+        "interval": {"$ref": "#/$defs/duration", "default": "200ms"},
+        "payload_size": {"type": "integer", "minimum": 0, "maximum": 1400, "default": 56}
+      }
+    },
+
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "warmup": {
+          "description": "Time between starting the background workloads and starting the primary ones, so that the load is already there.",
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "cooldown": {
+          "description": "Time after the primary workloads finished before the background ones are stopped, so that the dashboards show the end.",
+          "$ref": "#/$defs/duration",
+          "default": "10s"
+        },
+        "max_duration": {
+          "description": "Hard limit of the run; required when there is no primary workload.",
+          "$ref": "#/$defs/duration"
+        }
+      }
+    },
+
+    "monitoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prometheus_port": {
+          "description": "Controller port of the Prometheus UI: the local Prometheus (Docker) or the forward to the remote one (SSH). Distinct from hummbwtester's 8090 so that neither replaces the other's stack (running both experiments at once is still unsupported: they share the marketplace).",
+          "$ref": "#/$defs/port",
+          "default": 8091
+        },
+        "grafana_port": {"$ref": "#/$defs/port", "default": 3001},
+        "runner_metrics_port": {
+          "description": "Controller port where experiment.py run serves its own metrics (workload progress, ping, verification).",
+          "$ref": "#/$defs/port",
+          "default": 9189
+        },
+        "scrape_interval": {"$ref": "#/$defs/duration", "default": "1s"}
+      }
+    },
+
+    "docker_deployment": {
+      "description": "The generated Docker topology in <scion-dir>/gen. Same as hummbwtester.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"const": "docker"},
+        "router": {
+          "description": "Socket and queue sizing written into every generated border router's [router] section.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "send_buffer_size": {"type": "integer", "minimum": 0},
+            "receive_buffer_size": {"type": "integer", "minimum": 0},
+            "ingress_batch_size": {"type": "integer", "minimum": 1},
+            "processor_queue_size": {"type": "integer", "minimum": 1},
+            "egress_batch_size": {"type": "integer", "minimum": 1},
+            "egress_queue_size": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+
+    "ssh_deployment": {
+      "description": "Explicitly inventoried SSH hosts. Exactly deployment of hummbwtester, minus metrics.local_prometheus_port (the runner fills it from monitoring.prometheus_port); parsed with its load_deployment.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "hosts", "metrics", "shaping"],
+      "properties": {
+        "kind": {"const": "ssh"},
+        "hosts": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ssh", "sciond", "run_dir"],
+            "properties": {
+              "ssh": {"description": "SSH alias, used unchanged (ProxyJump etc. live in ~/.ssh/config).", "type": "string"},
+              "sciond": {"$ref": "#/$defs/host_port"},
+              "run_dir": {"type": "string", "pattern": "^/"},
+              "readiness_command": {"type": "string"},
+              "static_info": {"type": "string", "pattern": "^/"},
+              "control_service": {"type": "string"}
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prometheus"],
+          "properties": {
+            "prometheus": {"description": "The hosts entry Prometheus runs on.", "type": "string"},
+            "local_port_base": {"$ref": "#/$defs/port", "default": 19190},
+            "routers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["host", "address"],
+                "properties": {
+                  "host": {"type": "string"},
+                  "address": {"$ref": "#/$defs/host_port"},
+                  "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+                }
+              }
+            }
+          }
+        },
+        "shaping": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["host", "name", "device", "local", "remote", "expected_root"],
+            "properties": {
+              "host": {"type": "string"},
+              "name": {"type": "string"},
+              "device": {"type": "string"},
+              "local": {"type": "string"},
+              "remote": {"type": "string"},
+              "expected_root": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+
+    "tc": {
+      "description": "TBF settings: on every inter-AS border-router link (Docker) or on the deployment.shaping flows (SSH).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rate", "burst", "limit"],
+      "properties": {
+        "rate": {"$ref": "#/$defs/tc_value"},
+        "burst": {"$ref": "#/$defs/tc_value"},
+        "limit": {"$ref": "#/$defs/tc_value"}
+      }
+    }
+  }
+}

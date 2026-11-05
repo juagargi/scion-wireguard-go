@@ -1,0 +1,258 @@
+{
+  "$schema": "./experiment.schema.json",
+  "name": "sciera-1g",
+  "informative": [
+    "Target topology: SCIERA, three hosts (SSH deployment), as in hummbwtester-sciera.json.",
+    "",
+    "+---------------+            +---------------+            +---------------+",
+    "| ufes          |            | rnp           |            | ufms          |",
+    "| AS 71-2:0:152 |            | AS 71-1916    |            | AS 71-2:0:5c  |",
+    "| C  wgx-cd     |#101----#106| A  wgx-ab     |#103----#104| B  wgx-ab     |",
+    "|    10.79.0.1  |            |    10.78.0.1  |            | D  wgx-cd     |",
+    "|               |            |               |            | marketplace   |",
+    "+---------------+            +---------------+            +---------------+",
+    "",
+    "#N are interface IDs. Shaped links (tc settings below): rnp - ufms (#103/#104)",
+    "and rnp - ufes (#106/#101).",
+    "Tunnel ab (Hummingbird): A (rnp) -> B (ufms): 71-1916#103 71-2:0:5c#104, with a",
+    "reservation; copies 1 GiB of random data, verified with sha256 afterwards.",
+    "Tunnel cd (best effort): C (ufes) -> D (ufms): 71-2:0:152#101 71-1916#106,103",
+    "71-2:0:5c#104; UDP iperf3 at 10 mbps for as long as the copy runs.",
+    "Both tunnels share the shaped rnp -> ufms link (#103/#104).",
+    "Marketplace requests are best effort too, over 71-1916#3 71-2:0:5c#4 (br-1, not",
+    "shaped), pinned by path_to_marketplace_filter so that they share no interface with the",
+    "best-effort tunnel.",
+    "At 5 mbps the copy takes about half an hour."
+  ],
+  "hummingbird": {
+    "marketplace": {
+      "host": "ufms",
+      "scion_address": "[71-2:0:5c,127.0.0.1]:31888",
+      "username": "alice",
+      "password_env": "WGEXP_MARKETPLACE_PASSWORD",
+      "location_override": true,
+      "interfaces": {
+        "71-1916": [
+          0,
+          103,
+          106
+        ],
+        "71-2:0:152": [
+          0,
+          101
+        ],
+        "71-2:0:5c": [
+          0,
+          104
+        ]
+      }
+    },
+    "marketplace_insecure": true
+  },
+  "tunnels": [
+    {
+      "id": "ab",
+      "mtu": 1000,
+      "endpoints": [
+        {
+          "name": "A",
+          "node": "rnp",
+          "isd_as": "71-1916",
+          "host": "127.0.0.1",
+          "listen_port": 32000,
+          "tunnel_ip": "10.78.0.1",
+          "api_port": 28015,
+          "path_filter": "71-1916#103 71-2:0:5c#104",
+          "hummingbird": {
+            "bandwidth": "5mbps",
+            "reverse_bandwidth": "1mbps",
+            "duration": "5m",
+            "renewal_ahead": "30s",
+            "reservation_overlap": "20s",
+            "humm_start_offset": "-5s",
+            "partial": "71-1916,71-2:0:5c",
+            "path_to_marketplace_filter": "71-1916#3 71-2:0:5c#4"
+          }
+        },
+        {
+          "name": "B",
+          "node": "ufms",
+          "isd_as": "71-2:0:5c",
+          "host": "127.0.0.1",
+          "listen_port": 32000,
+          "tunnel_ip": "10.78.0.2",
+          "api_port": 28015,
+          "path_filter": "71-2:0:5c#104 71-1916#103"
+        }
+      ]
+    },
+    {
+      "id": "cd",
+      "mtu": 1000,
+      "endpoints": [
+        {
+          "name": "C",
+          "node": "ufes",
+          "isd_as": "71-2:0:152",
+          "host": "127.0.0.1",
+          "listen_port": 32001,
+          "tunnel_ip": "10.79.0.1",
+          "api_port": 28016,
+          "path_filter": "71-2:0:152#101 71-1916#106,103 71-2:0:5c#104"
+        },
+        {
+          "name": "D",
+          "node": "ufms",
+          "isd_as": "71-2:0:5c",
+          "host": "127.0.0.1",
+          "listen_port": 32001,
+          "tunnel_ip": "10.79.0.2",
+          "api_port": 28016,
+          "path_filter": "71-2:0:5c#104 71-1916#103,106 71-2:0:152#101"
+        }
+      ]
+    }
+  ],
+  "workloads": [
+    {
+      "id": "copy-1g",
+      "kind": "file_copy",
+      "role": "primary",
+      "from": "A",
+      "to": "B",
+      "size": "1GiB",
+      "verify": true,
+      "bwlimit": "reservation",
+      "timeout": "1h"
+    },
+    {
+      "id": "be-load",
+      "kind": "iperf3",
+      "role": "background",
+      "from": "C",
+      "to": "D",
+      "protocol": "udp",
+      "bandwidth": "10mbps",
+      "length": 900
+    },
+    {
+      "id": "ping-ab",
+      "kind": "ping",
+      "role": "background",
+      "from": "A",
+      "to": "B",
+      "interval": "200ms"
+    },
+    {
+      "id": "ping-cd",
+      "kind": "ping",
+      "role": "background",
+      "from": "C",
+      "to": "D",
+      "interval": "200ms"
+    }
+  ],
+  "run": {
+    "warmup": "60s",
+    "cooldown": "60s",
+    "max_duration": "2h"
+  },
+  "monitoring": {
+    "prometheus_port": 8091,
+    "grafana_port": 3001,
+    "runner_metrics_port": 9189,
+    "scrape_interval": "1s"
+  },
+  "deployment": {
+    "kind": "ssh",
+    "hosts": {
+      "rnp": {
+        "ssh": "sciera-rnp",
+        "sciond": "127.0.0.1:30255",
+        "run_dir": "/var/tmp/wgexp",
+        "control_service": "scion-control-service-cs1.service"
+      },
+      "ufes": {
+        "ssh": "sciera-ufes",
+        "sciond": "127.0.0.1:30255",
+        "run_dir": "/var/tmp/wgexp",
+        "control_service": "scion-control-service-cs1.service"
+      },
+      "ufms": {
+        "ssh": "sciera-ufms",
+        "sciond": "127.0.0.1:30255",
+        "run_dir": "/var/tmp/wgexp",
+        "control_service": "scion-control@cs-1.service"
+      }
+    },
+    "metrics": {
+      "prometheus": "ufms",
+      "local_port_base": 19190,
+      "routers": [
+        {
+          "host": "rnp",
+          "address": "127.0.0.1:38401",
+          "labels": {
+            "as": "71_1916",
+            "br": "br-2"
+          }
+        },
+        {
+          "host": "ufes",
+          "address": "127.0.0.1:38401",
+          "labels": {
+            "as": "71_2_0_152",
+            "br": "br-2"
+          }
+        },
+        {
+          "host": "ufms",
+          "address": "127.0.0.1:38401",
+          "labels": {
+            "as": "71_2_0_5c",
+            "br": "br-2"
+          }
+        }
+      ]
+    },
+    "shaping": [
+      {
+        "host": "rnp",
+        "name": "rnp-ufms",
+        "device": "eno4.140",
+        "local": "[fe80::77c:140%eno4.140]:50031",
+        "remote": "[fe80::2:0:5c:140]:50031",
+        "expected_root": "noqueue"
+      },
+      {
+        "host": "ufms",
+        "name": "ufms-rnp",
+        "device": "ens2f1.140",
+        "local": "[fe80::2:0:5c:140%ens2f1.140]:50031",
+        "remote": "[fe80::77c:140]:50031",
+        "expected_root": "noqueue"
+      },
+      {
+        "host": "rnp",
+        "name": "rnp-ufes",
+        "device": "eno4.137",
+        "local": "10.6.7.2:50001",
+        "remote": "10.6.7.1:50001",
+        "expected_root": "noqueue"
+      },
+      {
+        "host": "ufes",
+        "name": "ufes-rnp",
+        "device": "ens192",
+        "local": "10.6.7.1:50001",
+        "remote": "10.6.7.2:50001",
+        "expected_root": "mq"
+      }
+    ]
+  },
+  "tc": {
+    "rate": "10mbit",
+    "burst": "50kb",
+    "limit": "256kb"
+  }
+}

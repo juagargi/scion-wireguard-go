@@ -1,0 +1,151 @@
+{
+  "$schema": "./experiment.schema.json",
+  "name": "docker-tiny-1g",
+  "informative": [
+    "Target topology: Docker tiny topology (topology/tiny.topo), marketplace in AS 111.",
+    "",
+    "+-----------------+            +-----------------+            +-----------------+",
+    "| AS 1-ff00:0:111 |            | AS 1-ff00:0:110 |            | AS 1-ff00:0:112 |",
+    "| marketplace     |            | (core)          |            |                 |",
+    "| A  wgx-ab       |#41-------#1| C  wgx-cd       |#2--------#1| B  wgx-ab       |",
+    "|    10.78.0.1    |            |    10.79.0.1    |            |    10.78.0.2    |",
+    "|                 |            |                 |            | D  wgx-cd       |",
+    "|                 |            |                 |            |    10.79.0.2    |",
+    "+-----------------+            +-----------------+            +-----------------+",
+    "",
+    "#N are interface IDs. Both inter-AS links are shaped by the tc settings below.",
+    "Tunnel ab (Hummingbird): A (111) buys reservations to B (112) and copies 1 GiB of",
+    "random data to B, which is verified with sha256 afterwards.",
+    "Tunnel cd (best effort): C (110) sends UDP iperf3 traffic to D (112) at 50 mbps for",
+    "as long as the copy to B runs, overloading the shared 110 -> 112 link (#2/#1).",
+    "B and D share the tester container of 112: they differ in interface, listen port",
+    "and API port."
+  ],
+  "hummingbird": {
+    "marketplace": {
+      "username": "alice",
+      "password_env": "WGEXP_MARKETPLACE_PASSWORD",
+      "location_override": false
+    },
+    "marketplace_insecure": true
+  },
+  "tunnels": [
+    {
+      "id": "ab",
+      "mtu": 1000,
+      "endpoints": [
+        {
+          "name": "A",
+          "isd_as": "1-ff00:0:111",
+          "listen_port": 32000,
+          "tunnel_ip": "10.78.0.1",
+          "api_port": 28015,
+          "path_filter": "1-ff00:0:111#41 1-ff00:0:110#1,2 1-ff00:0:112#1",
+          "hummingbird": {
+            "bandwidth": "20mbps",
+            "reverse_bandwidth": "2mbps",
+            "duration": "60s",
+            "renewal_ahead": "15s",
+            "reservation_overlap": "10s"
+          }
+        },
+        {
+          "name": "B",
+          "isd_as": "1-ff00:0:112",
+          "listen_port": 32000,
+          "tunnel_ip": "10.78.0.2",
+          "api_port": 28015,
+          "path_filter": "1-ff00:0:112#1 1-ff00:0:110#2,1 1-ff00:0:111#41"
+        }
+      ]
+    },
+    {
+      "id": "cd",
+      "mtu": 1000,
+      "endpoints": [
+        {
+          "name": "C",
+          "isd_as": "1-ff00:0:110",
+          "listen_port": 32001,
+          "tunnel_ip": "10.79.0.1",
+          "api_port": 28016,
+          "path_filter": "1-ff00:0:110#2 1-ff00:0:112#1"
+        },
+        {
+          "name": "D",
+          "isd_as": "1-ff00:0:112",
+          "listen_port": 32001,
+          "tunnel_ip": "10.79.0.2",
+          "api_port": 28016,
+          "path_filter": "1-ff00:0:112#1 1-ff00:0:110#2"
+        }
+      ]
+    }
+  ],
+  "workloads": [
+    {
+      "id": "copy-1g",
+      "kind": "file_copy",
+      "role": "primary",
+      "from": "A",
+      "to": "B",
+      "size": "1GiB",
+      "verify": true,
+      "bwlimit": "reservation",
+      "timeout": "30m"
+    },
+    {
+      "id": "be-load",
+      "kind": "iperf3",
+      "role": "background",
+      "from": "C",
+      "to": "D",
+      "protocol": "udp",
+      "bandwidth": "50mbps",
+      "length": 900
+    },
+    {
+      "id": "ping-ab",
+      "kind": "ping",
+      "role": "background",
+      "from": "A",
+      "to": "B",
+      "interval": "200ms"
+    },
+    {
+      "id": "ping-cd",
+      "kind": "ping",
+      "role": "background",
+      "from": "C",
+      "to": "D",
+      "interval": "200ms"
+    }
+  ],
+  "run": {
+    "warmup": "30s",
+    "cooldown": "30s",
+    "max_duration": "1h"
+  },
+  "monitoring": {
+    "prometheus_port": 8091,
+    "grafana_port": 3001,
+    "runner_metrics_port": 9189,
+    "scrape_interval": "1s"
+  },
+  "deployment": {
+    "kind": "docker",
+    "router": {
+      "send_buffer_size": 16384,
+      "receive_buffer_size": 4194304,
+      "ingress_batch_size": 64,
+      "processor_queue_size": 640,
+      "egress_batch_size": 1,
+      "egress_queue_size": 640
+    }
+  },
+  "tc": {
+    "rate": "50mbit",
+    "burst": "50kb",
+    "limit": "256kb"
+  }
+}

@@ -29,6 +29,10 @@ This enhanced version of wireguard-go includes support for [SCION](https://docs.
 For detailed usage examples, setup scripts, and troubleshooting, see:
 - [`SCION_USAGE.md`](SCION_USAGE.md) - Complete SCION documentation
 
+## Experiment runner
+
+`tests/experiment/` holds a runner that sets up, runs and tears down wireguard-go experiments over SCION/Hummingbird (Docker or SSH hosts), with monitoring and a `results.json` per run. See [`tests/experiment/README.md`](tests/experiment/README.md).
+
 ## Platforms
 
 ### Linux

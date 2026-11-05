@@ -22,8 +22,15 @@ wireguard-go: $(wildcard *.go) $(wildcard */*.go)
 install: wireguard-go
 	@install -v -d "$(DESTDIR)$(BINDIR)" && install -v -m 0755 "$<" "$(DESTDIR)$(BINDIR)/wireguard-go"
 
-test:
+test: test-go test-experiment
+
+test-go:
 	go test ./...
+
+# Unit tests of the experiment runner (tests/experiment). They need no Docker. Tests that need
+# PyYAML, jsonschema or SCION_DIR are skipped without them.
+test-experiment:
+	python3 -m unittest discover -s tests/experiment -p 'test_*.py'
 
 # Runs every SCION integration test on a running tiny topology. Point it at the
 # checkout holding that topology with SCION_DIR, e.g. make test-integration SCION_DIR=~/scion
@@ -43,4 +50,4 @@ hummingbird-update-external-replace:
 
 
 
-.PHONY: all clean test test-integration install generate-version-and-build
+.PHONY: all clean test test-go test-integration test-experiment install generate-version-and-build

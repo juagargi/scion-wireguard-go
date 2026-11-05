@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 1s
+
+scrape_configs:
+  # wireguard-go endpoints. Target labels (experiment, tunnel, endpoint, peer, class, ...)
+  # win over any label of the same name in the scraped series (honor_labels is false).
+  - job_name: "wireguard"
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/wireguard.json
+
+  - job_name: "scion-border-routers"
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/border_routers.json
+
+  # The experiment runner (wgexp_* series). Its series carry their own workload labels.
+  - job_name: "wgexp-runner"
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/runner.json

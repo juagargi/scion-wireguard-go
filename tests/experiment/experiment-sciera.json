@@ -1,6 +1,6 @@
 {
   "$schema": "./experiment.schema.json",
-  "name": "sciera-1g",
+  "name": "sciera-500m",
   "informative": [
     "Target topology: SCIERA, three hosts (SSH deployment), as in hummbwtester-sciera.json.",
     "",
@@ -15,14 +15,15 @@
     "#N are interface IDs. Shaped links (tc settings below): rnp - ufms (#103/#104)",
     "and rnp - ufes (#106/#101).",
     "Tunnel ab (Hummingbird): A (rnp) -> B (ufms): 71-1916#103 71-2:0:5c#104, with a",
-    "reservation; copies 1 GiB of random data, verified with sha256 afterwards.",
+    "reservation; copies 500 MiB of random data, verified with sha256 afterwards.",
     "Tunnel cd (best effort): C (ufes) -> D (ufms): 71-2:0:152#101 71-1916#106,103",
     "71-2:0:5c#104; UDP iperf3 at 10 mbps for as long as the copy runs.",
     "Both tunnels share the shaped rnp -> ufms link (#103/#104).",
     "Marketplace requests are best effort too, over 71-1916#3 71-2:0:5c#4 (br-1, not",
     "shaped), pinned by path_to_marketplace_filter so that they share no interface with the",
     "best-effort tunnel.",
-    "At 5 mbps the copy takes about half an hour."
+    "At 5 mbps (4 mbps of payload after PAYLOAD_EFFICIENCY) the copy takes about 18 minutes.",
+    "ping-cd runs from D (ufms): ufes has GNU inetutils ping, without -I and -D."
   ],
   "hummingbird": {
     "marketplace": {
@@ -115,12 +116,12 @@
   ],
   "workloads": [
     {
-      "id": "copy-1g",
+      "id": "copy-500m",
       "kind": "file_copy",
       "role": "primary",
       "from": "A",
       "to": "B",
-      "size": "1GiB",
+      "size": "500MiB",
       "verify": true,
       "bwlimit": "reservation",
       "timeout": "1h"
@@ -147,8 +148,8 @@
       "id": "ping-cd",
       "kind": "ping",
       "role": "background",
-      "from": "C",
-      "to": "D",
+      "from": "D",
+      "to": "C",
       "interval": "200ms"
     }
   ],

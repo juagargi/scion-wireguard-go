@@ -84,8 +84,11 @@ TARGET_RUNNER = "targets/runner.json"
 TARGET_ROUTERS = "targets/border_routers.json"
 TARGET_FILES = (TARGET_WIREGUARD, TARGET_RUNNER, TARGET_ROUTERS)
 
-REQUIRED_TOOLS = ("ip", "rsync", "iperf3", "ping", "sha256sum")
-SSH_REQUIRED_TOOLS = (*REQUIRED_TOOLS, "nc")  # remote.preflight always uses nc for the daemon check
+# Tools every endpoint host needs (device set-up, the tunnel ping check); each workload kind adds its
+# own, only on the hosts at either end of it.
+BASE_TOOLS = ("ip", "ping", "sha256sum")
+WORKLOAD_TOOLS = {"file_copy": ("rsync", "dd"), "iperf3": ("iperf3",), "ping": ()}
+SSH_EXTRA_TOOLS = ("nc",)  # remote.preflight always uses nc for the daemon check
 TINY_DISPATCHED_PORTS = (31000, 32767)
 # One copy on each side, rsync's temporary file, and slack: as in tests/scion-end2end.py.
 DISK_SPACE_FACTOR = 2.5
@@ -216,6 +219,15 @@ def parse_dispatched_ports(spec: Any) -> Optional[tuple[int, int]]:
     if len(parts) != 2 or not all(p.isdigit() for p in parts):
         return None
     return int(parts[0]), int(parts[1])
+
+
+def required_tools(experiment: Experiment, host_key: str) -> tuple[str, ...]:
+    """The tools host_key needs: BASE_TOOLS, plus those of the workloads it is an end of."""
+    tools = list(BASE_TOOLS)
+    for w in experiment.workloads:
+        if host_key in (w.sender.host_key, w.receiver.host_key):
+            tools += [t for t in WORKLOAD_TOOLS.get(w.kind, ()) if t not in tools]
+    return tuple(tools)
 
 
 def host_payload_bytes(experiment: Experiment) -> dict[str, int]:
@@ -419,12 +431,17 @@ class Infra:
         problems: list[str] = []
         if self.check_tools_in_generic:
             script = ('for t in "$@"; do command -v "$t" >/dev/null 2>&1 || echo "$t"; done')
-            result = host.run(["bash", "-c", script, "_", *REQUIRED_TOOLS], check=False)
+            result = host.run(["bash", "-c", script, "_", *required_tools(self.experiment, host_key)],
+                              check=False)
             missing = result.stdout.split()
             if result.returncode != 0 and not missing:
                 missing = ["(could not run the tool check)"]
             if missing:
                 problems.append(f"{name}: missing tools: {', '.join(missing)}")
+        if any(w.kind == "ping" and w.sender.host_key == host_key for w in self.experiment.workloads):
+            if "iputils" not in host.run(["ping", "-V"], check=False).stdout:
+                problems.append(f"{name}: the ping workloads sent from here need iputils ping "
+                                f"(-D, -I <address>); `ping -V` does not report iputils")
         if host.run(["test", "-c", "/dev/net/tun"], check=False).returncode != 0:
             problems.append(f"{name}: /dev/net/tun is not available (WireGuard needs a TUN device)")
         problems += self._root_problems(host, name)
@@ -933,7 +950,8 @@ class SSHInfra(Infra):
 
     def _default_host(self, host_key: str) -> Any:
         import hosts  # lazy: hosts.py is implemented concurrently
-        return hosts.SSHHost(self.inventory.hosts[host_key])
+        # hummbwtester is already loaded: hand its ssh_orchestration over instead of hosts.configure().
+        return hosts.SSHHost(self.inventory.hosts[host_key], orchestration=self.remote)
 
     def _ssh_host(self, node: str) -> Any:
         return self.inventory.hosts[node]
@@ -991,7 +1009,8 @@ class SSHInfra(Infra):
         problems: list[str] = []
         participants = set(self.host_keys())
         for name in sorted(set(self.ss.setup_hosts(inv)) | participants):
-            tools = SSH_REQUIRED_TOOLS if name in participants else self.remote.DEFAULT_REQUIRED_TOOLS
+            tools = ((*required_tools(self.experiment, name), *SSH_EXTRA_TOOLS) if name in participants
+                     else self.remote.DEFAULT_REQUIRED_TOOLS)
             try:
                 self.remote.preflight(inv.hosts[name], self.dry_run, required_tools=tools)
             except (subprocess.SubprocessError, RuntimeError, OSError, ValueError) as err:
@@ -1054,7 +1073,15 @@ class SSHInfra(Infra):
         local: Optional[Path] = None
         try:
             # Logging in only reads the marketplace, so a dry run does it too (as hummbwtester).
-            token = self.ss.obtain_marketplace_jwt(self.inventory)
+            # Before the first setup the marketplace is not running yet: a dry run only notes that.
+            try:
+                token = self.ss.obtain_marketplace_jwt(self.inventory)
+            except _RECOVERABLE as err:
+                if not self.dry_run:
+                    raise
+                self._say(f"dry-run: would obtain the marketplace JWT and upload it to "
+                          f"{', '.join(sorted(paths))} (cannot log in yet: {err})")
+                return paths
             local = self.hb.orchestration.write_private_jwt(token)
             for key in sorted(paths):
                 host = self._ssh_host(key)

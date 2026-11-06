@@ -3,6 +3,7 @@
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -198,6 +199,40 @@ class TestUapi(unittest.TestCase):
         self.assertIn("allowed_ip=10.78.0.2/32", req)  # B's tunnel ip
         self.assertIn("scion_endpoint=1-ff00:0:112,[fd00::7f00:15]:32000", req)
 
+    def test_configure_retries_while_the_daemon_has_no_path(self):
+        host = FakeHost()
+        inst = instance("A", host)
+        answers = [WireguardError("errno=-55: failed to get path for IA 1-ff00:0:112: no path found"),
+                   "errno=0\n\n"]
+        sent = []
+
+        def uapi(request):
+            sent.append(request)
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        inst.uapi = uapi
+        refreshed = []
+        inst.refresh_paths = lambda: refreshed.append(True)
+        with mock.patch.object(wg, "NO_PATH_RETRY_INTERVAL", 0):
+            inst.configure("PEERPUB", "fd00::7f00:15")
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sent[0], sent[1])
+        self.assertEqual(refreshed, [True])
+
+    def test_configure_does_not_retry_other_errors(self):
+        inst = instance("A", FakeHost())
+        sent = []
+
+        def uapi(request):
+            sent.append(request)
+            raise WireguardError("errno=-22: invalid key")
+        inst.uapi = uapi
+        with self.assertRaises(WireguardError):
+            inst.configure("PEERPUB", "fd00::7f00:15")
+        self.assertEqual(len(sent), 1)
+
     def test_configure_needs_a_peer_host(self):
         with self.assertRaises(WireguardError):
             instance("A").configure("PUB")
@@ -335,14 +370,54 @@ class TestChecks(unittest.TestCase):
 
     def test_wait_for_tunnel(self):
         host = FakeHost()
+        host.responders.append((lambda a, i: a == ["ping", "-V"], "ping from iputils 20211215\n", 0))
         host.responders.append((lambda a, i: a[0] == "ping", "", 0))
         self.assertEqual(wg.wait_for_tunnel(host, "10.78.0.1", "10.78.0.2", 5), 1)
-        ping = [c[0] for c in host.calls][0]
+        ping = [c[0] for c in host.calls][1]
         self.assertEqual(ping, ["ping", "-c", "1", "-W", "2", "-I", "10.78.0.1", "10.78.0.2"])
         host.responders[:] = [(lambda a, i: a[0] == "ping", "", 1)]
         with self.assertRaises(WireguardError) as cm:
             wg.wait_for_tunnel(host, "10.78.0.1", "10.78.0.2", 0, lambda: "STATE")
         self.assertIn("STATE", str(cm.exception))
+
+
+    def test_wait_for_tunnel_with_inetutils_ping(self):
+        # GNU inetutils ping (SCIERA's ufes) rejects -I <address>: the route picks the tunnel anyway.
+        host = FakeHost()
+        host.responders.append((lambda a, i: a == ["ping", "-V"], "ping (GNU inetutils) 2.5\n", 0))
+        host.responders.append((lambda a, i: a[0] == "ping", "", 0))
+        wg.wait_for_tunnel(host, "10.79.0.1", "10.79.0.2", 5)
+        self.assertEqual([c[0] for c in host.calls][1], ["ping", "-c", "1", "-W", "2", "10.79.0.2"])
+
+
+class TestPathFilterRetry(unittest.TestCase):
+    def test_filter_matches(self):
+        log = ("Path filter for 1-ff00:0:112: 0 of 0 paths match \"x\"\n"
+               "Path filter for 1-ff00:0:111: 2 of 4 paths match \"y\"\n"
+               "Path filter for 1-ff00:0:112: 1 of 3 paths match \"x\"\n")
+        self.assertEqual(wg.filter_matches(log, "1-ff00:0:112"), 1)
+        self.assertEqual(wg.filter_matches(log, "1-ff00:0:111"), 2)
+        self.assertIsNone(wg.filter_matches(log, "1-ff00:0:110"))
+
+    def test_reapplies_the_filter_while_no_path_matches(self):
+        inst = instance("A")
+        filt = inst.endpoint.path_filter
+        logs = [f'Path filter for 1-ff00:0:112: 0 of 0 paths match "{filt}"\n',
+                f'Path filter for 1-ff00:0:112: 1 of 3 paths match "{filt}"\n']
+        inst.log_text = lambda: logs[0] if len(sent) < 2 else logs[0] + logs[1]
+        sent, refreshed = [], []
+        inst.refresh_paths = lambda: refreshed.append(True)
+
+        def uapi(request):
+            sent.append(request)
+            return f"scion_path_filter=1-ff00:0:112 {filt}\nerrno=0\n\n" if request.startswith("get") \
+                else "errno=0\n\n"
+        inst.uapi = uapi
+        with mock.patch.object(wg, "NO_PATH_RETRY_INTERVAL", 0):
+            self.assertTrue(inst.set_path_filter())
+        sets = [r for r in sent if r.startswith("set=1")]
+        self.assertEqual(len(sets), 2)
+        self.assertEqual(refreshed, [True])
 
 
 class TestStop(unittest.TestCase):

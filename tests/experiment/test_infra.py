@@ -245,6 +245,8 @@ class DockerPreflight(unittest.TestCase):
         def answer(argv, root):
             if argv[:2] == ["bash", "-c"]:
                 return 0, ""
+            if argv == ["ping", "-V"]:
+                return 0, "ping from iputils 20211215\n"
             return 0, "10.0.0.0/8 dev eth9\n" if "route" in argv and False else ""
         i, hosts = self.infra_with(answer)
         self.assertEqual(i.preflight(), [])
@@ -255,6 +257,19 @@ class DockerPreflight(unittest.TestCase):
         self.assertEqual(len(routes), 4)
         self.assertIn(["ip", "-o", "route", "show", "to", "root", "10.78.0.0/24"], routes)
         self.assertFalse(any(root for c, root in hosts["1-ff00:0:112"].commands))
+
+    def test_ping_sender_needs_iputils(self):
+        def answer(argv, root):
+            if argv == ["ping", "-V"]:
+                return 0, "ping (GNU inetutils) 2.5\n"
+            return 0, ""
+        i, _ = self.infra_with(answer)
+        i.dry_run = True
+        problems = i.preflight()
+        # ping-ab is sent from A (111) and ping-cd from C (110); 112 sends no ping
+        self.assertEqual(sorted(p.split(":")[0] for p in problems if "iputils" in p),
+                         ["1-ff00", "1-ff00"])
+        self.assertFalse(any(p.startswith("1-ff00:0:112") and "iputils" in p for p in problems))
 
     def test_problems_are_collected(self):
         def answer(argv, root):
@@ -623,6 +638,17 @@ class DockerFlow(unittest.TestCase):
         self.assertEqual((seen["cfg"].username, seen["cfg"].location_override), ("alice", False))
 
 
+class RequiredTools(unittest.TestCase):
+    """Each host is asked only for the tools of the workloads it is an end of."""
+
+    def test_sciera_hosts(self):
+        exp = sciera_experiment()
+        self.assertEqual(infra.required_tools(exp, "rnp"), ("ip", "ping", "sha256sum", "rsync", "dd"))
+        self.assertEqual(infra.required_tools(exp, "ufes"), ("ip", "ping", "sha256sum", "iperf3"))
+        self.assertEqual(infra.required_tools(exp, "ufms"),
+                         ("ip", "ping", "sha256sum", "rsync", "dd", "iperf3"))
+
+
 @needs_scion
 class SSHFlow(unittest.TestCase):
     """(c) The SSH inventory, sources, documents and relay specs for experiment-sciera.json.
@@ -672,7 +698,7 @@ class SSHFlow(unittest.TestCase):
         ])
         self.assertEqual(sources[0].labels["node"], "rnp")
         self.assertEqual(sources[3].labels, {
-            "experiment": "sciera-1g", "tunnel": "cd", "endpoint": "D", "peer": "C",
+            "experiment": sciera_experiment().name, "tunnel": "cd", "endpoint": "D", "peer": "C",
             "class": "best_effort", "tunnel_class": "best_effort", "isd_as": "71-2:0:5c",
             "node": "ufms"})
         self.assertEqual(sources[5].labels, {"as": "71_1916", "br": "br-2"})
@@ -685,7 +711,7 @@ class SSHFlow(unittest.TestCase):
                          [["127.0.0.1:19190"], ["127.0.0.1:28015"], ["127.0.0.1:19192"],
                           ["127.0.0.1:28016"]])
         self.assertEqual(docs["targets/runner.json"],
-                         [{"targets": ["127.0.0.1:19194"], "labels": {"experiment": "sciera-1g"}}])
+                         [{"targets": ["127.0.0.1:19194"], "labels": {"experiment": sciera_experiment().name}}])
         self.assertEqual([t["targets"] for t in docs["targets/border_routers.json"]],
                          [["127.0.0.1:19195"], ["127.0.0.1:19196"], ["127.0.0.1:38401"]])
 
@@ -834,6 +860,8 @@ class SSHFlow(unittest.TestCase):
         def answer(argv, root):
             if argv[:2] == ["bash", "-c"] and "df -Pk" in argv[2]:
                 return 0, "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 100 1 99999999 1% /\n"
+            if argv == ["ping", "-V"]:
+                return 0, "ping from iputils 20240117\n"
             return 0, ""
 
         hosts = {}
@@ -850,7 +878,7 @@ class SSHFlow(unittest.TestCase):
                 mock.patch("builtins.print"):
             self.assertEqual(i.preflight(), [])
         self.assertEqual(sorted(p[0] for p in pre), ["rnp", "ufes", "ufms"])
-        self.assertEqual(pre[0][2], ("ip", "rsync", "iperf3", "ping", "sha256sum", "nc"))
+        self.assertEqual(pre[0][2], ("ip", "ping", "sha256sum", "rsync", "dd", "nc"))  # rnp: A sends the copy
         for key, host in hosts.items():
             cmds = host.commands
             self.assertIn((["true"], True), cmds)  # sudo -n true

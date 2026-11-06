@@ -166,6 +166,22 @@ OVERRIDE_PURCHASE = re.compile(
     r"HUMMINGBIRD_MARKETPLACE_ADDRESS")
 PATH_FILTER = re.compile(r"Path filter for (\S+): (\d+) of (\d+) paths match .*")
 CANNOT_LISTEN = re.compile(r"^.*cannot listen on.*$", re.MULTILINE)
+# wireguard-go rejects scion_endpoint when its daemon has no path to the peer's AS at that moment.
+# On SCIERA the daemon's segment lookups fail now and then, so configure() refreshes and retries.
+NO_PATH = "no path found"
+NO_PATH_RETRY_SECONDS = 90.0
+NO_PATH_RETRY_INTERVAL = 5.0
+
+
+def filter_matches(log: str, isd_as: str) -> int | None:
+    """How many paths to isd_as the latest path filter matched, per the log; None if not logged."""
+    found = [int(m.group(2)) for m in PATH_FILTER.finditer(log) if m.group(1) == isd_as]
+    return found[-1] if found else None
+
+
+def ping_is_iputils(host: Host) -> bool:
+    """Whether the host's ping is iputils (with -I <address> and -D). GNU inetutils ping is not."""
+    return "iputils" in host.run(["ping", "-V"], check=False, timeout=10).stdout
 
 
 @dataclass(frozen=True)
@@ -344,9 +360,25 @@ class WireguardInstance:
         peer_host = peer_address or self.peer.host
         if not peer_host:
             raise WireguardError(f"the SCION host of peer {self.peer.name} is unknown: pass peer_address")
-        self.uapi(peer_transaction(
+        request = peer_transaction(
             self.private_key, self.endpoint.listen_port, peer_public_key, self.peer.tunnel_ip,
-            self.peer.isd_as, peer_host, self.peer.listen_port, self.tunnel.persistent_keepalive))
+            self.peer.isd_as, peer_host, self.peer.listen_port, self.tunnel.persistent_keepalive)
+        deadline = time.monotonic() + NO_PATH_RETRY_SECONDS
+        while True:
+            try:
+                self.uapi(request)
+                return
+            except WireguardError as err:
+                if NO_PATH not in str(err) or time.monotonic() >= deadline:
+                    raise
+            # The transaction is idempotent: the same key, port and peer are set again.
+            self.refresh_paths()
+            time.sleep(NO_PATH_RETRY_INTERVAL)
+
+    def refresh_paths(self) -> None:
+        """Make the daemon fetch fresh paths to the peer's AS (best effort: `scion` may be absent)."""
+        self.host.run(["scion", "showpaths", self.peer.isd_as, "--sciond", self.sciond, "--refresh"],
+                      check=False, timeout=30)
 
     def set_path_filter(self) -> bool:
         """Restrict the paths to the peer's AS to endpoint.path_filter, and read it back. False if none."""
@@ -354,6 +386,13 @@ class WireguardInstance:
         if sequence is None:
             return False
         self.uapi(path_filter_request(self.peer.isd_as, sequence))
+        # wireguard-go does not look for paths again until the filter is re-applied (or its 5-minute
+        # refresh) when its daemon had none at this moment: refresh the daemon and re-apply.
+        deadline = time.monotonic() + NO_PATH_RETRY_SECONDS
+        while filter_matches(self.log_text(), self.peer.isd_as) == 0 and time.monotonic() < deadline:
+            self.refresh_paths()
+            time.sleep(NO_PATH_RETRY_INTERVAL)
+            self.uapi(path_filter_request(self.peer.isd_as, sequence))
         expected = f"scion_path_filter={self.peer.isd_as} {sequence}"
         status = self.uapi("get=1\n\n")
         if expected not in status.splitlines():
@@ -473,9 +512,12 @@ def wait_for_tunnel(host: Host, src_ip: str, dst_ip: str, timeout: float,
     """Block until a ping from src_ip to dst_ip passes through the tunnel. Returns the attempts."""
     deadline = time.monotonic() + timeout
     attempt = 0
+    # GNU inetutils ping (e.g. on SCIERA's ufes) has no -I <address>; the route to dst_ip leaves
+    # through the tunnel device anyway, with src_ip as its source.
+    source = ["-I", src_ip] if ping_is_iputils(host) else []
     while time.monotonic() < deadline:
         attempt += 1
-        if host.run(["ping", "-c", "1", "-W", "2", "-I", src_ip, dst_ip], check=False,
+        if host.run(["ping", "-c", "1", "-W", "2", *source, dst_ip], check=False,
                     timeout=10).returncode == 0:
             return attempt
         time.sleep(2)

@@ -253,6 +253,16 @@ class RunTest(unittest.TestCase):
         self.assertEqual(sorted(r.index for r in run.runners.values() if r.w.kind == "file_copy"), [0])
         self.assertIn("PASS", self.output)
 
+    def test_run_dir_is_made_by_the_user_before_the_instances(self):
+        # wireguard-go's root launcher would otherwise create it, owned by root, and the workloads
+        # (not root) could not write into it.
+        order = []
+        start = FakeInstance.start
+        with mock.patch.object(FakeInstance, "start", lambda self: order.append("start") or start(self)):
+            _, _, _, infra = self.run_()
+        for host in infra.hosts().values():
+            self.assertIn(["mkdir", "-p", "--", "/tmp/wgexp/runs/rid/work"], host.commands)
+
     def test_leftovers_removed_first_only_ours(self):
         _, _, _, infra = self.run_()
         host = infra.hosts()["1-ff00:0:112"]

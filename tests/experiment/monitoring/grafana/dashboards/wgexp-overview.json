@@ -693,7 +693,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "clamp_min(sum by (tunnel, endpoint) (increase(wireguard_sent_packets_total{tunnel=~\"$tunnel\"}[1m])) - on (tunnel, endpoint) sum by (tunnel, endpoint) (label_replace(increase(wireguard_received_packets_total{tunnel=~\"$tunnel\"}[1m]), \"endpoint\", \"$1\", \"peer\", \"(.*)\")), 0)",
+          "expr": "sum by (tunnel, endpoint) (increase(wireguard_sent_packets_total{tunnel=~\"$tunnel\"}[1m])) - on (tunnel, endpoint) sum by (tunnel, endpoint) (label_replace(increase(wireguard_received_packets_total{tunnel=~\"$tunnel\"}[1m]), \"endpoint\", \"$1\", \"peer\", \"(.*)\"))",
           "legendFormat": "{{tunnel}} {{endpoint}} underlay gap",
           "range": true,
           "refId": "B"

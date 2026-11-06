@@ -214,13 +214,10 @@ class TestUapi(unittest.TestCase):
                 raise answer
             return answer
         inst.uapi = uapi
-        refreshed = []
-        inst.refresh_paths = lambda: refreshed.append(True)
         with mock.patch.object(wg, "NO_PATH_RETRY_INTERVAL", 0):
             inst.configure("PEERPUB", "fd00::7f00:15")
         self.assertEqual(len(sent), 2)
         self.assertEqual(sent[0], sent[1])
-        self.assertEqual(refreshed, [True])
 
     def test_configure_does_not_retry_other_errors(self):
         inst = instance("QoS1", FakeHost())
@@ -389,36 +386,6 @@ class TestChecks(unittest.TestCase):
         host.responders.append((lambda a, i: a[0] == "ping", "", 0))
         wg.wait_for_tunnel(host, "10.79.0.1", "10.79.0.2", 5)
         self.assertEqual([c[0] for c in host.calls][1], ["ping", "-c", "1", "-W", "2", "10.79.0.2"])
-
-
-class TestPathFilterRetry(unittest.TestCase):
-    def test_filter_matches(self):
-        log = ("Path filter for 1-ff00:0:112: 0 of 0 paths match \"x\"\n"
-               "Path filter for 1-ff00:0:111: 2 of 4 paths match \"y\"\n"
-               "Path filter for 1-ff00:0:112: 1 of 3 paths match \"x\"\n")
-        self.assertEqual(wg.filter_matches(log, "1-ff00:0:112"), 1)
-        self.assertEqual(wg.filter_matches(log, "1-ff00:0:111"), 2)
-        self.assertIsNone(wg.filter_matches(log, "1-ff00:0:110"))
-
-    def test_reapplies_the_filter_while_no_path_matches(self):
-        inst = instance("QoS1")
-        filt = inst.endpoint.path_filter
-        logs = [f'Path filter for 1-ff00:0:112: 0 of 0 paths match "{filt}"\n',
-                f'Path filter for 1-ff00:0:112: 1 of 3 paths match "{filt}"\n']
-        inst.log_text = lambda: logs[0] if len(sent) < 2 else logs[0] + logs[1]
-        sent, refreshed = [], []
-        inst.refresh_paths = lambda: refreshed.append(True)
-
-        def uapi(request):
-            sent.append(request)
-            return f"scion_path_filter=1-ff00:0:112 {filt}\nerrno=0\n\n" if request.startswith("get") \
-                else "errno=0\n\n"
-        inst.uapi = uapi
-        with mock.patch.object(wg, "NO_PATH_RETRY_INTERVAL", 0):
-            self.assertTrue(inst.set_path_filter())
-        sets = [r for r in sent if r.startswith("set=1")]
-        self.assertEqual(len(sets), 2)
-        self.assertEqual(refreshed, [True])
 
 
 class TestStop(unittest.TestCase):

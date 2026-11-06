@@ -520,18 +520,30 @@ func (s *ScionNetBind) Send(bufs [][]byte, ep Endpoint) error {
 
 	// Use batch connection if available
 	if connData.batchConn != nil && connData.useBatch {
-		return connData.batchConn.WriteBatch(
+		err := connData.batchConn.WriteBatch(
 			connData.ipv4PC, connData.ipv6PC,
 			connData.ipv4TxOffload, connData.ipv6TxOffload,
 			bufs, scionEp)
+		s.reportSendFailure(&connData, scionEp, err)
+		return err
 	}
 
 	// Fallback to regular SCION connection
 	if connData.scionConn != nil {
-		return s.sendSCION(bufs, scionEp, connData.scionConn)
+		err := s.sendSCION(bufs, scionEp, connData.scionConn)
+		s.reportSendFailure(&connData, scionEp, err)
+		return err
 	}
 
 	return fmt.Errorf("no suitable transport for endpoint")
+}
+
+// reportSendFailure tells the path manager that sending to ep failed, so that it looks the
+// paths up again instead of waiting for its next periodic refresh.
+func (s *ScionNetBind) reportSendFailure(cd *connData, ep *ScionNetEndpoint, err error) {
+	if err != nil && cd.pathManager != nil {
+		cd.pathManager.ReportPathFailure(ep.scionAddr.IA)
+	}
 }
 
 func (s *ScionNetBind) sendSCION(bufs [][]byte, ep *ScionNetEndpoint, conn *snet.Conn) error {

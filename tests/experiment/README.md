@@ -179,8 +179,9 @@ SCION_DIR=$SCION PATH=/tmp/wgexp-venv/bin:$PATH make test-experiment
   `results.json` (`reservations_bought`, `handovers`).
 - A copy that fails verification: set `keep_files: true` and compare the files in
   `/tmp/wgexp/runs/<run_id>/work/` in the containers.
-- **Known issue**: during a 1 GiB run both wireguard-go ends once stalled for about 5 minutes with
-  `no path to ... matches its path filter: no path found`, until the path filter was re-applied. The cause is unconfirmed; if it recurs, keep the `wg-*.log` files.
+- **Path lookups**: the daemon's segment lookups fail now and then, so wireguard-go may log
+  `no paths found ... keeping the N cached ones and retrying`. It keeps its paths and asks again
+  with growing delays, so this is not an error of the run. If the tunnel stalls anyway, keep the `wg-*.log` files.
 - **Never `pkill` by name** (`wireguard-go`, `rsync`, `iperf3`) in testers: QoS2 and BE2 share a container,
   and the runner tracks its processes by pidfile. Use `teardown`, which stops only what it started.
 - Leftover `wgx-*` devices or processes after a crash: `teardown` removes them.

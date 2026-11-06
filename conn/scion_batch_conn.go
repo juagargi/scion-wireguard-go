@@ -633,6 +633,14 @@ func (s *ScionBatchConn) WriteBatch(
 	if err != nil {
 		return err
 	}
+	if revExtn != nil {
+		sizes := make([]int, len(sbufs))
+		for i, b := range sbufs {
+			sizes[i] = len(b)
+		}
+		s.logger.Verbosef("Hummingbird reverse extension sent to %s in a batch of %d packets, sizes %v",
+			scionEp.scionAddr.IA, len(sbufs), sizes)
+	}
 
 	return s.sendBatchWithRetry(ipv4PC, ipv6PC,
 		ipv4TxOffload, ipv6TxOffload,

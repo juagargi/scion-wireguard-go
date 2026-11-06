@@ -408,6 +408,10 @@ func (pm *PathManager) TakeReverseExtn(ia addr.IA) *slayers.EndToEndExtn {
 	}
 	extn := entry.PendingReverseExtn
 	entry.PendingReverseExtn = nil
+	if extn != nil {
+		pm.log.Verbosef("Hummingbird reverse reservation for %s advertised at %s",
+			ia, time.Now().UTC().Format("15:04:05.000"))
+	}
 	return extn
 }
 
@@ -888,6 +892,8 @@ func (pm *PathManager) installReservation(
 	entry.ForwardReservation = rsv
 	entry.ReservationNextHop = nextHop
 	entry.PendingReverseExtn = extn
+	pm.log.Verbosef("Hummingbird reservation for %s installed at %s (reverse extension pending: %t)",
+		dest, time.Now().UTC().Format("15:04:05.000"), extn != nil)
 }
 
 // dropExpiredReservation forgets the reservation of dest once it has expired,

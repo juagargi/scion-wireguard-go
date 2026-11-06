@@ -25,6 +25,7 @@ STATE_VALUE = {PENDING: 0, RUNNING: 1, PASSED: 2, FAILED: 3}
 # headers). A limit equal to the reservation would get part of the traffic demoted.
 PAYLOAD_EFFICIENCY = 0.8
 RSYNC_BASE_PORT = 8730          # rsync daemon port = RSYNC_BASE_PORT + index (index unique per run)
+POLL_INTERVAL = 0.05             # seconds between checks of a running process, for it and for stop
 RESTART_BACKOFF = 1.0           # seconds between iperf3 restarts
 RTT_BUCKETS = (0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
                0.25, 0.5, 1.0, 2.5, 5.0)
@@ -492,6 +493,7 @@ class FileCopyRunner(WorkloadRunner):
             env=None, log_path=f"{self.receiver_dir}/rsyncd.stdout", pid_path=self.pid_path)
         self._daemon_started = True
         deadline = time.monotonic() + 20
+        delay = 0.05
         while True:
             probe = self.receiver.run(["rsync", f"rsync://{self.dst_ip}:{self.port}/"],
                                       check=False, timeout=10)
@@ -500,7 +502,8 @@ class FileCopyRunner(WorkloadRunner):
             if time.monotonic() > deadline:
                 raise RuntimeError(f"rsync daemon on {self.dst_ip}:{self.port} did not come up: "
                                    f"{(probe.stderr or '').strip()}")
-            time.sleep(0.3)
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
 
     def _create_payload(self, size: int) -> None:
         mib, rem = divmod(size, 1 << 20)
@@ -674,7 +677,7 @@ class Iperf3Runner(WorkloadRunner):
             first = False
             client = self._spawn(self.sender, self._client_argv(), "client", self._client_line)
             while client.poll() is None and (self._server is None or self._server.poll() is None):
-                if self._stop.wait(0.2):
+                if self._stop.wait(POLL_INTERVAL):
                     return
             server_died = self._server is not None and self._server.poll() is not None
             if client.poll() is None:  # server died first
@@ -741,7 +744,7 @@ class PingRunner(WorkloadRunner):
     def _run(self) -> None:
         proc = self._spawn(self.sender, self._argv(), "ping", self._line)
         while proc.poll() is None:
-            if self._stop.wait(0.2):
+            if self._stop.wait(POLL_INTERVAL):
                 self._terminate(proc)  # SIGTERM: ping prints its summary, picked up by the pump
                 self._summarise()
                 self._completed = True

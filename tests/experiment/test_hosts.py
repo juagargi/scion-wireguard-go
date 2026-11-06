@@ -19,6 +19,15 @@ from hosts import DockerHost, HostError, LocalHost, SSHHost  # noqa: E402
 SECRET = "s3cr3t-jwt-value"
 
 
+def wait_until(cond, timeout=10.0):
+    """Poll cond every few milliseconds until it holds."""
+    deadline = time.monotonic() + timeout
+    while not cond():
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out waiting for the condition")
+        time.sleep(0.005)
+
+
 class LocalBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -36,10 +45,12 @@ class TestGuardScript(unittest.TestCase):
     command at once.)"""
 
     def test_survives_while_stdin_is_open_and_dies_on_eof(self):
-        proc = subprocess.Popen(hosts._bash(hosts._GUARD_SCRIPT, "sleep", "30"), stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.Popen(hosts._bash(hosts._GUARD_SCRIPT, "bash", "-c", "echo up; exec sleep 30"),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True)
         try:
-            time.sleep(1.0)
+            self.assertEqual(proc.stdout.readline().strip(), "up")
+            time.sleep(0.2)  # the regression killed the command at once
             self.assertIsNone(proc.poll())
             proc.stdin.close()
             proc.wait(timeout=10)
@@ -109,10 +120,7 @@ class TestLocalHost(LocalBase):
         self.addCleanup(self.host.stop_daemon, pid_path)
         self.assertEqual(int(Path(pid_path).read_text()), pid)
         self.assertTrue(self.host.daemon_alive(pid_path))
-        for _ in range(50):
-            if Path(log).read_text():
-                break
-            time.sleep(0.1)
+        wait_until(lambda: Path(log).read_text())
         self.assertEqual(Path(log).read_text().strip(), f"T={SECRET} A=x y;z")
         # The secret is in neither the command line of the daemon nor of anything we started.
         self.assertNotIn(SECRET, Path(f"/proc/{pid}/cmdline").read_text())
@@ -128,10 +136,11 @@ class TestLocalHost(LocalBase):
 
     def test_stop_kills_a_term_ignoring_daemon(self):
         pid_path = self.path("t.pid")
-        self.host.start_daemon(["bash", "-c", "trap '' TERM; while :; do sleep 0.1; done"], env=None,
-                               log_path=self.path("t.log"), pid_path=pid_path)
-        time.sleep(0.3)
-        self.assertTrue(self.host.stop_daemon(pid_path, timeout=0.5))
+        log = self.path("t.log")
+        self.host.start_daemon(["bash", "-c", "trap '' TERM; echo ready; while :; do sleep 0.1; done"],
+                               env=None, log_path=log, pid_path=pid_path)
+        wait_until(lambda: Path(log).read_text())  # the trap is in place
+        self.assertTrue(self.host.stop_daemon(pid_path, timeout=0.2))
         self.assertFalse(self.host.daemon_alive(pid_path))
 
     def test_start_script_input_quotes(self):
@@ -218,8 +227,7 @@ class TestSSHHost(LocalBase):
         for command in self.orch.commands:
             self.assertNotIn(SECRET, command)
         self.assertTrue(any(SECRET in (i or "") for i in self.orch.inputs))
-        time.sleep(0.3)
-        self.assertIn(SECRET, Path(self.path("r", "l.log")).read_text())
+        wait_until(lambda: SECRET in Path(self.path("r", "l.log")).read_text())
 
     def test_root_prefix_for_daemon_commands(self):
         orch = FakeOrchestration(execute=False)

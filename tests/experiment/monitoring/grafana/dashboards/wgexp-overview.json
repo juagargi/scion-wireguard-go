@@ -317,15 +317,17 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "State of every workload over time: pending, running, passed, failed.",
+      "description": "State of every workload over time: pending (gray), running (blue), passed (green), failed (red).",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "fixed",
+            "fixedColor": "text"
           },
           "custom": {
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "spanNulls": 90000
           },
           "mappings": [
             {
@@ -375,7 +377,7 @@
       "id": 105,
       "options": {
         "mergeValues": true,
-        "showValue": "auto",
+        "showValue": "never",
         "alignValue": "left",
         "rowHeight": 0.8,
         "legend": {

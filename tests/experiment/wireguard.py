@@ -141,21 +141,22 @@ def redact(text: str) -> str:
 
 def peer_transaction(private_key: str, listen_port: int, peer_public_key: str, peer_tunnel_ip: str,
                      peer_isd_as: str, peer_host: str, peer_listen_port: int,
-                     keepalive: int) -> str:
-    """The UAPI `set` transaction that configures the device and its single peer."""
+                     keepalive: int, path_filter: str | None = None) -> str:
+    """The UAPI `set` transaction that configures the device and its single peer.
+
+    The path filter, if any, comes before the peer: wireguard-go buys a reservation as soon as it
+    has the peer's scion_endpoint, and must do so for a path the filter allows.
+    """
     return "\n".join([
         "set=1",
         f"private_key={private_key}",
         f"listen_port={listen_port}",
+        *([f"scion_path_filter={peer_isd_as} {path_filter}"] if path_filter else []),
         f"public_key={peer_public_key}",
         f"allowed_ip={peer_tunnel_ip}/32",
         f"scion_endpoint={peer_isd_as},[{peer_host}]:{peer_listen_port}",
         f"persistent_keepalive_interval={keepalive}",
         "", ""])
-
-
-def path_filter_request(peer_isd_as: str, sequence: str) -> str:
-    return f"set=1\nscion_path_filter={peer_isd_as} {sequence}\n\n"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -364,7 +365,8 @@ class WireguardInstance:
             raise WireguardError(f"the SCION host of peer {self.peer.name} is unknown: pass peer_address")
         request = peer_transaction(
             self.private_key, self.endpoint.listen_port, peer_public_key, self.peer.tunnel_ip,
-            self.peer.isd_as, peer_host, self.peer.listen_port, self.tunnel.persistent_keepalive)
+            self.peer.isd_as, peer_host, self.peer.listen_port, self.tunnel.persistent_keepalive,
+            self.endpoint.path_filter)
         deadline = time.monotonic() + NO_PATH_RETRY_SECONDS
         while True:
             try:
@@ -376,12 +378,11 @@ class WireguardInstance:
             # The transaction is idempotent: the same key, port and peer are set again.
             time.sleep(NO_PATH_RETRY_INTERVAL)
 
-    def set_path_filter(self) -> bool:
-        """Restrict the paths to the peer's AS to endpoint.path_filter, and read it back. False if none."""
+    def check_path_filter(self) -> bool:
+        """Read back that endpoint.path_filter, which configure() set, is in force. False if none."""
         sequence = self.endpoint.path_filter
         if sequence is None:
             return False
-        self.uapi(path_filter_request(self.peer.isd_as, sequence))
         expected = f"scion_path_filter={self.peer.isd_as} {sequence}"
         status = self.uapi("get=1\n\n")
         if expected not in status.splitlines():
@@ -517,8 +518,9 @@ def wait_for_tunnel(host: Host, src_ip: str, dst_ip: str, timeout: float,
 
 def bring_up_tunnel(a: WireguardInstance, b: WireguardInstance, timeout: float = 60.0,
                     reservation_timeout: float = 60.0) -> dict[str, str | None]:
-    """Both instances already started: wait for UAPI, exchange keys, configure, filter, bring up,
-    check the APIs, ping both ways, and wait for the reservations of Hummingbird senders.
+    """Both instances already started: wait for UAPI, exchange keys, configure (with the path filter),
+    check the filter, bring up, check the APIs, ping both ways, and wait for the reservations of
+    Hummingbird senders.
 
     Returns {endpoint name: its 'in use' reservation log line or None}.
     """
@@ -527,7 +529,7 @@ def bring_up_tunnel(a: WireguardInstance, b: WireguardInstance, timeout: float =
     a.configure(b.public_key, b.scion_host)
     b.configure(a.public_key, a.scion_host)
     for inst in (a, b):
-        inst.set_path_filter()
+        inst.check_path_filter()
         inst.bring_up()
     for inst in (a, b):
         inst.check_api()

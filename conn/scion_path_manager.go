@@ -58,6 +58,7 @@ type PathCacheEntry struct {
 	ReservationNextHop *net.UDPAddr          // Underlay next hop of the path it was bought for
 	PendingReverseExtn *slayers.EndToEndExtn // Reverse reservation still to be advertised
 	CancelRenewal      context.CancelFunc    // Cancel routine for renewal loop
+	Accepted           bool                  // A peer endpoint in this IA was accepted: reservations are bought
 }
 
 // PathRank contains ranking information for a single path
@@ -577,10 +578,25 @@ func (pm *PathManager) fetch(dest addr.IA, force bool) (noAnswer bool, _ error) 
 	return noAnswer, nil
 }
 
+// AcceptEndpoint tells the manager that a peer endpoint in ia was accepted, which starts
+// keeping a reservation to it. Until then paths to ia are only tracked: an endpoint that was
+// rejected, or that is only being looked at, buys nothing.
+func (pm *PathManager) AcceptEndpoint(ia addr.IA) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	entry := pm.cache[ia]
+	if entry == nil {
+		return
+	}
+	entry.Accepted = true
+	pm.startRenewalLocked(ia, entry)
+}
+
 // startRenewalLocked starts keeping a reservation to dest, unless that is already
-// going on or there is no path to buy it for. The caller holds pm.mu.
+// going on, no endpoint in dest was accepted or there is no path to buy it for.
+// The caller holds pm.mu.
 func (pm *PathManager) startRenewalLocked(dest addr.IA, entry *PathCacheEntry) {
-	if pm.humm.Enabled && entry.CancelRenewal == nil && len(entry.Paths) > 0 {
+	if pm.humm.Enabled && entry.Accepted && entry.CancelRenewal == nil && len(entry.Paths) > 0 {
 		ctx, cancel := context.WithCancel(pm.ctx)
 		entry.CancelRenewal = cancel
 		go pm.reservationRenewalLoop(ctx, dest)

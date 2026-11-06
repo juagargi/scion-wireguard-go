@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/daemon"
 	"github.com/scionproto/scion/pkg/daemon/types"
+	"github.com/scionproto/scion/pkg/hummingbird/marketplace"
 	"github.com/scionproto/scion/pkg/segment/iface"
 	"github.com/scionproto/scion/pkg/snet"
 	snetpath "github.com/scionproto/scion/pkg/snet/path"
@@ -246,4 +248,41 @@ func TestPathManagerRetriesWithoutCachedPaths(t *testing.T) {
 	// The retry loop finds the paths as soon as the daemon has them, long before a periodic refresh.
 	d.set(testPath(2))
 	waitFor(t, "the retry to find the paths", func() bool { return len(pm.getPaths(dst)) == 1 })
+}
+
+func TestPathManagerBuysOnlyForAcceptedEndpoints(t *testing.T) {
+	var purchases atomic.Int32
+	orig := oneShotReservation
+	oneShotReservation = func(context.Context, snet.Path, string, snet.PathQuerier, snet.Topology, bool,
+		marketplace.ReservationRequest,
+	) (*snetpath.Reservation, error) {
+		purchases.Add(1)
+		return nil, errors.New("stop")
+	}
+	t.Cleanup(func() { oneShotReservation = orig })
+
+	dst := addr.MustParseIA("1-ff00:0:111")
+	d := &syncDaemon{paths: []snet.Path{testPath(2)}}
+	pm := newSyncPathManager(t, d)
+	pm.humm = DefaultHummingbirdConfig()
+	pm.humm.Enabled = true
+	pm.humm.Duration = time.Minute
+	pm.humm.MarketplaceAddress = "[71-2:0:5c,127.0.0.1]:31888"
+
+	// Paths are known, but no endpoint was accepted: nothing is bought, however often they refresh.
+	pm.RegisterEndpoint(dst)
+	pm.refreshAll()
+	if err := pm.refreshOne(dst, true); err != nil {
+		t.Fatal(err)
+	}
+	pm.mu.RLock()
+	started := pm.cache[dst].CancelRenewal != nil
+	pm.mu.RUnlock()
+	if started || purchases.Load() != 0 {
+		t.Fatalf("a destination without an accepted endpoint buys: renewal %v, %d purchases",
+			started, purchases.Load())
+	}
+
+	pm.AcceptEndpoint(dst)
+	waitFor(t, "the first purchase", func() bool { return purchases.Load() >= 1 })
 }

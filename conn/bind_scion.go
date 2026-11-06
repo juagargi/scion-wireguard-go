@@ -575,6 +575,7 @@ func (s *ScionNetBind) ParseEndpoint(str string) (Endpoint, error) {
 		if pathManager != nil {
 			pathManager.RegisterEndpoint(scionAddr.IA)
 			if p, err := pathManager.GetPath(scionAddr.IA); err == nil {
+				pathManager.AcceptEndpoint(scionAddr.IA)
 				scionAddr.Path = p.Dataplane()
 				scionAddr.NextHop = p.UnderlayNextHop()
 				if fwdRes, nextHop, hasRes := pathManager.GetReservation(scionAddr.IA); hasRes {

@@ -187,6 +187,16 @@ class TestUapi(unittest.TestCase):
                                "scion_endpoint=1-ff00:0:112,[fd00::7f00:15]:32000\n"
                                "persistent_keepalive_interval=25\n\n")
 
+    def test_peer_transaction_sets_the_path_filter_before_the_peer(self):
+        text = wg.peer_transaction("PRIV", 32000, "PUB", "10.78.0.2", "1-ff00:0:112", "fd00::7f00:15",
+                                   32000, 25, "1-ff00:0:110#2 0*")
+        lines = text.splitlines()
+        self.assertIn("scion_path_filter=1-ff00:0:112 1-ff00:0:110#2 0*", lines)
+        self.assertLess(lines.index("scion_path_filter=1-ff00:0:112 1-ff00:0:110#2 0*"),
+                        lines.index("public_key=PUB"))
+        self.assertLess(lines.index("scion_path_filter=1-ff00:0:112 1-ff00:0:110#2 0*"),
+                        lines.index("scion_endpoint=1-ff00:0:112,[fd00::7f00:15]:32000"))
+
     def test_configure_sends_peer_values(self):
         host = FakeHost()
         inst = instance("QoS1", host)
@@ -199,6 +209,9 @@ class TestUapi(unittest.TestCase):
         self.assertIn("public_key=PEERPUB", req)
         self.assertIn("allowed_ip=10.78.0.2/32", req)  # QoS2's tunnel ip
         self.assertIn("scion_endpoint=1-ff00:0:112,[fd00::7f00:15]:32000", req)
+        lines = req.splitlines()
+        self.assertLess(lines.index(f"scion_path_filter=1-ff00:0:112 {inst.endpoint.path_filter}"),
+                        lines.index("public_key=PEERPUB"))
 
     def test_configure_retries_while_the_daemon_has_no_path(self):
         host = FakeHost()
@@ -269,14 +282,13 @@ class TestUapi(unittest.TestCase):
     def test_path_filter_read_back(self):
         inst = instance("QoS1")
         filt = inst.endpoint.path_filter
-        replies = ["errno=0\n\n", f"x=1\nscion_path_filter=1-ff00:0:112 {filt}\nerrno=0\n\n"]
         sent = []
-        inst.uapi = lambda r: sent.append(r) or replies.pop(0)
-        self.assertTrue(inst.set_path_filter())
-        self.assertEqual(sent[0], f"set=1\nscion_path_filter=1-ff00:0:112 {filt}\n\n")
+        inst.uapi = lambda r: sent.append(r) or f"x=1\nscion_path_filter=1-ff00:0:112 {filt}\nerrno=0\n\n"
+        self.assertTrue(inst.check_path_filter())
+        self.assertEqual(sent, ["get=1\n\n"])  # nothing is set here: configure() did
         inst.uapi = lambda r: "errno=0\n\n"
         with self.assertRaises(WireguardError):
-            inst.set_path_filter()
+            inst.check_path_filter()
 
     def test_no_path_filter_configured(self):
         raw = config.json.loads(DOCKER.read_text())
@@ -284,7 +296,7 @@ class TestUapi(unittest.TestCase):
         exp = config.parse_config(raw, Path("x.json"))
         inst = instance("QoS1", experiment=exp)
         inst.uapi = lambda r: self.fail("no UAPI call expected")
-        self.assertFalse(inst.set_path_filter())
+        self.assertFalse(inst.check_path_filter())
 
 
 class TestChecks(unittest.TestCase):

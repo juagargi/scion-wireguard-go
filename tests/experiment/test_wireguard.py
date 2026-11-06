@@ -70,7 +70,7 @@ class FakeHost:
         return "[fd00::14]:30255"
 
 
-def instance(name="A", host=None, jwt=JWT, mutate=None, experiment=None):
+def instance(name="QoS1", host=None, jwt=JWT, mutate=None, experiment=None):
     exp = experiment or config.load_config(DOCKER)
     ep = exp.endpoint(name)
     return WireguardInstance(exp, ep, host or FakeHost(), "/share/bin/wireguard-go", "/tmp/wgexp",
@@ -98,7 +98,7 @@ class TestKeys(unittest.TestCase):
 
 class TestEnv(unittest.TestCase):
     def test_sender_env_in_order(self):
-        inst = instance("A")
+        inst = instance("QoS1")
         env = inst.env()
         self.assertEqual(list(env)[:8], ["USE_SCION", "USE_BATCH", "LOG_LEVEL", "WG_PROCESS_FOREGROUND",
                                          "WG_UAPI_DIR", "SCION_DAEMON_ADDRESS", "SCION_LOCAL_IA",
@@ -117,7 +117,7 @@ class TestEnv(unittest.TestCase):
         self.assertNotIn("HUMMINGBIRD_MARKETPLACE_ADDRESS", env)
 
     def test_receiver_has_no_hummingbird(self):
-        env = instance("B").env()
+        env = instance("QoS2").env()
         self.assertFalse([k for k in env if k.startswith("HUMMINGBIRD")])
 
     def test_use_batch_false_policy_and_override_last(self):
@@ -128,7 +128,7 @@ class TestEnv(unittest.TestCase):
         ep["env"] = {"LOG_LEVEL": "debug", "EXTRA": "1"}
         raw["hummingbird"]["marketplace"].update(location_override=True, scion_address="[1-ff00:0:111,127.0.0.1]:8080")
         exp = config.parse_config(raw, Path("x.json"))
-        env = instance("A", experiment=exp).env()
+        env = instance("QoS1", experiment=exp).env()
         self.assertEqual(env["USE_BATCH"], "0")
         self.assertEqual(env["SCION_PATH_POLICY"], "policy.json")
         self.assertEqual(env["LOG_LEVEL"], "debug")  # endpoint.env overrides everything
@@ -139,42 +139,42 @@ class TestEnv(unittest.TestCase):
         raw = config.json.loads(DOCKER.read_text())
         raw["tunnels"][0]["endpoints"][0]["host"] = "10.9.9.9"
         exp = config.parse_config(raw, Path("x.json"))
-        self.assertEqual(instance("A", experiment=exp).env()["SCION_LOCAL_IA"], "1-ff00:0:111,10.9.9.9")
+        self.assertEqual(instance("QoS1", experiment=exp).env()["SCION_LOCAL_IA"], "1-ff00:0:111,10.9.9.9")
 
 
 class TestStart(unittest.TestCase):
     def test_start_passes_jwt_by_file_not_value(self):
         host = FakeHost()
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         self.assertEqual(inst.start(), 4242)
         d = host.daemons[0]
         self.assertEqual(d["argv"], ["/share/bin/wireguard-go", "-f", "wgx-ab"])
         self.assertEqual(d["files"], {"SCION_MARKETPLACE_JWT": JWT})
         self.assertNotIn("SCION_MARKETPLACE_JWT", d["env"])
         self.assertFalse(d["root"])  # the binary carries cap_net_admin; only `ip` needs root
-        self.assertEqual(d["log"], "/tmp/wgexp/runs/run1/wg-A.log")
-        self.assertEqual(d["pid"], "/tmp/wgexp/runs/run1/wg-A.pid")
+        self.assertEqual(d["log"], "/tmp/wgexp/runs/run1/wg-QoS1.log")
+        self.assertEqual(d["pid"], "/tmp/wgexp/runs/run1/wg-QoS1.pid")
 
     def test_receiver_takes_no_jwt(self):
         host = FakeHost()
-        instance("B", host, jwt=None).start()
+        instance("QoS2", host, jwt=None).start()
         self.assertEqual(host.daemons[0]["files"], {})
 
     def test_sender_without_jwt_fails(self):
         with self.assertRaises(WireguardError):
-            instance("A", FakeHost(), jwt=None).start()
+            instance("QoS1", FakeHost(), jwt=None).start()
 
     def test_refuses_an_existing_interface(self):
         host = FakeHost()
         host.responders.append((lambda a, i: a[:3] == ["ip", "link", "show"], "", 0))
         with self.assertRaises(WireguardError) as cm:
-            instance("A", host).start()
+            instance("QoS1", host).start()
         self.assertIn("wgx-ab", str(cm.exception))
         self.assertFalse(host.daemons)
         # Not-existing: ip link show fails.
         host = FakeHost()
         host.responders.append((lambda a, i: a[:3] == ["ip", "link", "show"], "", 1))
-        instance("A", host).start()
+        instance("QoS1", host).start()
         self.assertEqual(len(host.daemons), 1)
 
 
@@ -189,7 +189,7 @@ class TestUapi(unittest.TestCase):
 
     def test_configure_sends_peer_values(self):
         host = FakeHost()
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         sent = []
         inst.uapi = lambda request: sent.append(request) or "errno=0\n\n"
         inst.configure("PEERPUB", "fd00::7f00:15")
@@ -197,12 +197,12 @@ class TestUapi(unittest.TestCase):
         self.assertIn(f"private_key={inst.private_key}", req)
         self.assertIn("listen_port=32000", req)
         self.assertIn("public_key=PEERPUB", req)
-        self.assertIn("allowed_ip=10.78.0.2/32", req)  # B's tunnel ip
+        self.assertIn("allowed_ip=10.78.0.2/32", req)  # QoS2's tunnel ip
         self.assertIn("scion_endpoint=1-ff00:0:112,[fd00::7f00:15]:32000", req)
 
     def test_configure_retries_while_the_daemon_has_no_path(self):
         host = FakeHost()
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         answers = [WireguardError("errno=-55: failed to get path for IA 1-ff00:0:112: no path found"),
                    "errno=0\n\n"]
         sent = []
@@ -223,7 +223,7 @@ class TestUapi(unittest.TestCase):
         self.assertEqual(refreshed, [True])
 
     def test_configure_does_not_retry_other_errors(self):
-        inst = instance("A", FakeHost())
+        inst = instance("QoS1", FakeHost())
         sent = []
 
         def uapi(request):
@@ -236,7 +236,7 @@ class TestUapi(unittest.TestCase):
 
     def test_configure_needs_a_peer_host(self):
         with self.assertRaises(WireguardError):
-            instance("A").configure("PUB")
+            instance("QoS1").configure("PUB")
 
     def test_uapi_errno_and_redaction(self):
         host = FakeHost()
@@ -244,7 +244,7 @@ class TestUapi(unittest.TestCase):
             (lambda a, i: a[0] == "bash", "perl\n", 0),
             (lambda a, i: a[0] == "perl", "errno=22\n\n", 0),
         ]
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         with self.assertRaises(WireguardError) as cm:
             inst.uapi("set=1\nprivate_key=SUPERSECRET\n\n")
         self.assertIn("errno=22", str(cm.exception))
@@ -257,7 +257,7 @@ class TestUapi(unittest.TestCase):
             (lambda a, i: a[0] == "bash", "perl\n", 0),
             (lambda a, i: a[0] == "perl", "public_key=ab\nerrno=0\n\n", 0),
         ]
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         self.assertIn("errno=0", inst.uapi("get=1\n\n"))
         inst.uapi("get=1\n\n")
         self.assertEqual(sum(1 for c in host.calls if c[0][0] == "bash"), 1)
@@ -267,10 +267,10 @@ class TestUapi(unittest.TestCase):
 
     def test_no_uapi_tool(self):
         with self.assertRaises(WireguardError):
-            instance("A").uapi("get=1\n\n")
+            instance("QoS1").uapi("get=1\n\n")
 
     def test_path_filter_read_back(self):
-        inst = instance("A")
+        inst = instance("QoS1")
         filt = inst.endpoint.path_filter
         replies = ["errno=0\n\n", f"x=1\nscion_path_filter=1-ff00:0:112 {filt}\nerrno=0\n\n"]
         sent = []
@@ -285,7 +285,7 @@ class TestUapi(unittest.TestCase):
         raw = config.json.loads(DOCKER.read_text())
         del raw["tunnels"][0]["endpoints"][0]["path_filter"]
         exp = config.parse_config(raw, Path("x.json"))
-        inst = instance("A", experiment=exp)
+        inst = instance("QoS1", experiment=exp)
         inst.uapi = lambda r: self.fail("no UAPI call expected")
         self.assertFalse(inst.set_path_filter())
 
@@ -293,7 +293,7 @@ class TestUapi(unittest.TestCase):
 class TestChecks(unittest.TestCase):
     def test_bring_up_commands(self):
         host = FakeHost()
-        instance("A", host).bring_up()
+        instance("QoS1", host).bring_up()
         cmds = [c[0] for c in host.calls]
         self.assertEqual(cmds, [["ip", "address", "add", "10.78.0.1/24", "dev", "wgx-ab"],
                                 ["ip", "link", "set", "mtu", "1000", "dev", "wgx-ab"],
@@ -302,7 +302,7 @@ class TestChecks(unittest.TestCase):
 
     def test_check_api_ok_and_failure_reports_cannot_listen(self):
         host = FakeHost()
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         host.responders.append((lambda a, i: a[0] == "bash", "HTTP/1.0 200 OK\n", 0))
         self.assertIn("200", inst.check_api())
         # connect target: 0.0.0.0 -> loopback
@@ -326,16 +326,16 @@ class TestChecks(unittest.TestCase):
         self.assertEqual(stats.marketplaces, ("[1-ff00:0:111,10.0.0.1]:8080",))
         self.assertEqual(wg.parse_reservation_stats("").handovers, 0)
         host = FakeHost()
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         host.files[inst.log_path] = log
         self.assertIn("in use", inst.wait_for_reservation(1))
         self.assertEqual(inst.reservation_log_stats().purchased, 3)
         # receivers have nothing to wait for
-        self.assertIsNone(instance("B", host).wait_for_reservation(1))
+        self.assertIsNone(instance("QoS2", host).wait_for_reservation(1))
 
     def test_wait_for_reservation_times_out_with_hints(self):
         host = FakeHost()
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         host.files[inst.log_path] = "Hummingbird: no assets found\n"
         with self.assertRaises(WireguardError) as cm:
             inst.wait_for_reservation(0)
@@ -344,7 +344,7 @@ class TestChecks(unittest.TestCase):
     def test_wait_uapi_detects_dead_daemon(self):
         host = FakeHost()
         host.alive_state = False
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         host.files[inst.log_path] = "boom\n"
         with self.assertRaises(WireguardError) as cm:
             inst.wait_uapi(1)
@@ -356,7 +356,7 @@ class TestChecks(unittest.TestCase):
         raw["hummingbird"]["marketplace"].update(location_override=True, scion_address=addr)
         exp = config.parse_config(raw, Path("x.json"))
         host = FakeHost()
-        inst = instance("A", host, experiment=exp)
+        inst = instance("QoS1", host, experiment=exp)
         with self.assertRaises(WireguardError):
             inst.check_marketplace_override()
         line = ("Hummingbird: buying the reservation for 1-ff00:0:112 from the marketplace at {}, "
@@ -367,7 +367,7 @@ class TestChecks(unittest.TestCase):
         with self.assertRaises(WireguardError):
             inst.check_marketplace_override()
         # Without override there is nothing to check.
-        self.assertIsNone(instance("A", host).check_marketplace_override())
+        self.assertIsNone(instance("QoS1", host).check_marketplace_override())
 
     def test_wait_for_tunnel(self):
         host = FakeHost()
@@ -401,7 +401,7 @@ class TestPathFilterRetry(unittest.TestCase):
         self.assertIsNone(wg.filter_matches(log, "1-ff00:0:110"))
 
     def test_reapplies_the_filter_while_no_path_matches(self):
-        inst = instance("A")
+        inst = instance("QoS1")
         filt = inst.endpoint.path_filter
         logs = [f'Path filter for 1-ff00:0:112: 0 of 0 paths match "{filt}"\n',
                 f'Path filter for 1-ff00:0:112: 1 of 3 paths match "{filt}"\n']
@@ -424,10 +424,10 @@ class TestPathFilterRetry(unittest.TestCase):
 class TestStop(unittest.TestCase):
     def test_stop_deletes_only_its_interface(self):
         host = FakeHost()
-        inst = instance("A", host)
+        inst = instance("QoS1", host)
         inst.start()
         self.assertTrue(inst.stop())
-        self.assertEqual(host.stopped, ["/tmp/wgexp/runs/run1/wg-A.pid"])
+        self.assertEqual(host.stopped, ["/tmp/wgexp/runs/run1/wg-QoS1.pid"])
         cmds = [c[0] for c in host.calls]
         self.assertIn(["ip", "link", "del", "dev", "wgx-ab"], cmds)
         self.assertIn(["rm", "-f", "--", "/tmp/wgexp/uapi/wgx-ab.sock"], cmds)
@@ -438,9 +438,9 @@ class TestStop(unittest.TestCase):
     def test_cleanup_leftovers_spares_foreign_interfaces(self):
         host = FakeHost()
         host.responders.append((lambda a, i: a[0] == "bash",
-                                "/tmp/wgexp/runs/old/wg-A.pid /tmp/wgexp/runs/old/wg-B.pid\n", 0))
+                                "/tmp/wgexp/runs/old/wg-QoS1.pid /tmp/wgexp/runs/old/wg-QoS2.pid\n", 0))
         done = wg.cleanup_leftovers(host, "/tmp/wgexp/", ["wgx-ab", "wg0", "eth0"])
-        self.assertEqual(host.stopped, ["/tmp/wgexp/runs/old/wg-A.pid", "/tmp/wgexp/runs/old/wg-B.pid"])
+        self.assertEqual(host.stopped, ["/tmp/wgexp/runs/old/wg-QoS1.pid", "/tmp/wgexp/runs/old/wg-QoS2.pid"])
         dels = [c[0] for c in host.calls if c[0][:3] == ["ip", "link", "del"]]
         self.assertEqual(dels, [["ip", "link", "del", "dev", "wgx-ab"]])
         self.assertIn("wgx-ab", done)

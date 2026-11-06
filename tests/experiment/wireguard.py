@@ -23,7 +23,7 @@ Where the integrator has to be careful:
   Docker (SCION_DAEMON of the tester) and SSH (the deployment host's `sciond`).
 * The peer's SCION host for `scion_endpoint` comes from `configure(peer_address=...)`; with
   `bring_up_tunnel` it is the peer's `scion_host` (its Endpoint.host, else its host.address()).
-* Instances of endpoints that share a container (B and D in the Docker example) are told apart by
+* Instances of endpoints that share a container (QoS2 and BE2 in the Docker example) are told apart by
   interface name, listen port and API port, all from the config.
 """
 

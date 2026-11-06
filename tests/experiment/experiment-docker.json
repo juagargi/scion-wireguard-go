@@ -7,18 +7,18 @@
     "+-----------------+            +-----------------+            +-----------------+",
     "| AS 1-ff00:0:111 |            | AS 1-ff00:0:110 |            | AS 1-ff00:0:112 |",
     "| marketplace     |            | (core)          |            |                 |",
-    "| A  wgx-ab       |#41-------#1| C  wgx-cd       |#2--------#1| B  wgx-ab       |",
+    "| QoS1 wgx-ab     |#41-------#1| BE1 wgx-cd      |#2--------#1| QoS2 wgx-ab     |",
     "|    10.78.0.1    |            |    10.79.0.1    |            |    10.78.0.2    |",
-    "|                 |            |                 |            | D  wgx-cd       |",
+    "|                 |            |                 |            | BE2 wgx-cd      |",
     "|                 |            |                 |            |    10.79.0.2    |",
     "+-----------------+            +-----------------+            +-----------------+",
     "",
     "#N are interface IDs. Both inter-AS links are shaped by the tc settings below.",
-    "Tunnel ab (Hummingbird): A (111) buys reservations to B (112) and copies 1 GiB of",
-    "random data to B, which is verified with sha256 afterwards.",
-    "Tunnel cd (best effort): C (110) sends UDP iperf3 traffic to D (112) at 50 mbps for",
-    "as long as the copy to B runs, overloading the shared 110 -> 112 link (#2/#1).",
-    "B and D share the tester container of 112: they differ in interface, listen port",
+    "Tunnel ab (Hummingbird): QoS1 (111) buys reservations to QoS2 (112) and copies 1 GiB of",
+    "random data to QoS2, which is verified with sha256 afterwards.",
+    "Tunnel cd (best effort): BE1 (110) sends UDP iperf3 traffic to BE2 (112) at 50 mbps for",
+    "as long as the copy to QoS2 runs, overloading the shared 110 -> 112 link (#2/#1).",
+    "QoS2 and BE2 share the tester container of 112: they differ in interface, listen port",
     "and API port."
   ],
   "hummingbird": {
@@ -35,7 +35,7 @@
       "mtu": 1000,
       "endpoints": [
         {
-          "name": "A",
+          "name": "QoS1",
           "isd_as": "1-ff00:0:111",
           "listen_port": 32000,
           "tunnel_ip": "10.78.0.1",
@@ -50,7 +50,7 @@
           }
         },
         {
-          "name": "B",
+          "name": "QoS2",
           "isd_as": "1-ff00:0:112",
           "listen_port": 32000,
           "tunnel_ip": "10.78.0.2",
@@ -64,7 +64,7 @@
       "mtu": 1000,
       "endpoints": [
         {
-          "name": "C",
+          "name": "BE1",
           "isd_as": "1-ff00:0:110",
           "listen_port": 32001,
           "tunnel_ip": "10.79.0.1",
@@ -72,7 +72,7 @@
           "path_filter": "1-ff00:0:110#2 1-ff00:0:112#1"
         },
         {
-          "name": "D",
+          "name": "BE2",
           "isd_as": "1-ff00:0:112",
           "listen_port": 32001,
           "tunnel_ip": "10.79.0.2",
@@ -87,8 +87,8 @@
       "id": "copy-1g",
       "kind": "file_copy",
       "role": "primary",
-      "from": "A",
-      "to": "B",
+      "from": "QoS1",
+      "to": "QoS2",
       "size": "1GiB",
       "verify": true,
       "bwlimit": "reservation",
@@ -98,8 +98,8 @@
       "id": "be-load",
       "kind": "iperf3",
       "role": "background",
-      "from": "C",
-      "to": "D",
+      "from": "BE1",
+      "to": "BE2",
       "protocol": "udp",
       "bandwidth": "50mbps",
       "length": 900
@@ -108,16 +108,16 @@
       "id": "ping-ab",
       "kind": "ping",
       "role": "background",
-      "from": "A",
-      "to": "B",
+      "from": "QoS1",
+      "to": "QoS2",
       "interval": "200ms"
     },
     {
       "id": "ping-cd",
       "kind": "ping",
       "role": "background",
-      "from": "C",
-      "to": "D",
+      "from": "BE1",
+      "to": "BE2",
       "interval": "200ms"
     }
   ],

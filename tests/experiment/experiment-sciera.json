@@ -7,23 +7,23 @@
     "+---------------+            +---------------+            +---------------+",
     "| ufes          |            | rnp           |            | ufms          |",
     "| AS 71-2:0:152 |            | AS 71-1916    |            | AS 71-2:0:5c  |",
-    "| C  wgx-cd     |#101----#106| A  wgx-ab     |#103----#104| B  wgx-ab     |",
-    "|    10.79.0.1  |            |    10.78.0.1  |            | D  wgx-cd     |",
+    "| BE1 wgx-cd    |#101----#106| QoS1 wgx-ab   |#103----#104| QoS2 wgx-ab   |",
+    "|    10.79.0.1  |            |    10.78.0.1  |            | BE2 wgx-cd    |",
     "|               |            |               |            | marketplace   |",
     "+---------------+            +---------------+            +---------------+",
     "",
     "#N are interface IDs. Shaped links (tc settings below): rnp - ufms (#103/#104)",
     "and rnp - ufes (#106/#101).",
-    "Tunnel ab (Hummingbird): A (rnp) -> B (ufms): 71-1916#103 71-2:0:5c#104, with a",
+    "Tunnel ab (Hummingbird): QoS1 (rnp) -> QoS2 (ufms): 71-1916#103 71-2:0:5c#104, with a",
     "reservation; copies 500 MiB of random data, verified with sha256 afterwards.",
-    "Tunnel cd (best effort): C (ufes) -> D (ufms): 71-2:0:152#101 71-1916#106,103",
+    "Tunnel cd (best effort): BE1 (ufes) -> BE2 (ufms): 71-2:0:152#101 71-1916#106,103",
     "71-2:0:5c#104; UDP iperf3 at 10 mbps for as long as the copy runs.",
     "Both tunnels share the shaped rnp -> ufms link (#103/#104).",
     "Marketplace requests are best effort too, over 71-1916#3 71-2:0:5c#4 (br-1, not",
     "shaped), pinned by path_to_marketplace_filter so that they share no interface with the",
     "best-effort tunnel.",
     "At 5 mbps (4 mbps of payload after PAYLOAD_EFFICIENCY) the copy takes about 18 minutes.",
-    "ping-cd runs from D (ufms): ufes has GNU inetutils ping, without -I and -D."
+    "ping-cd runs from BE2 (ufms): ufes has GNU inetutils ping, without -I and -D."
   ],
   "hummingbird": {
     "marketplace": {
@@ -56,7 +56,7 @@
       "mtu": 1000,
       "endpoints": [
         {
-          "name": "A",
+          "name": "QoS1",
           "node": "rnp",
           "isd_as": "71-1916",
           "host": "127.0.0.1",
@@ -76,7 +76,7 @@
           }
         },
         {
-          "name": "B",
+          "name": "QoS2",
           "node": "ufms",
           "isd_as": "71-2:0:5c",
           "host": "127.0.0.1",
@@ -92,7 +92,7 @@
       "mtu": 1000,
       "endpoints": [
         {
-          "name": "C",
+          "name": "BE1",
           "node": "ufes",
           "isd_as": "71-2:0:152",
           "host": "127.0.0.1",
@@ -102,7 +102,7 @@
           "path_filter": "71-2:0:152#101 71-1916#106,103 71-2:0:5c#104"
         },
         {
-          "name": "D",
+          "name": "BE2",
           "node": "ufms",
           "isd_as": "71-2:0:5c",
           "host": "127.0.0.1",
@@ -119,8 +119,8 @@
       "id": "copy-500m",
       "kind": "file_copy",
       "role": "primary",
-      "from": "A",
-      "to": "B",
+      "from": "QoS1",
+      "to": "QoS2",
       "size": "500MiB",
       "verify": true,
       "bwlimit": "reservation",
@@ -130,8 +130,8 @@
       "id": "be-load",
       "kind": "iperf3",
       "role": "background",
-      "from": "C",
-      "to": "D",
+      "from": "BE1",
+      "to": "BE2",
       "protocol": "udp",
       "bandwidth": "10mbps",
       "length": 900
@@ -140,16 +140,16 @@
       "id": "ping-ab",
       "kind": "ping",
       "role": "background",
-      "from": "A",
-      "to": "B",
+      "from": "QoS1",
+      "to": "QoS2",
       "interval": "200ms"
     },
     {
       "id": "ping-cd",
       "kind": "ping",
       "role": "background",
-      "from": "D",
-      "to": "C",
+      "from": "BE2",
+      "to": "BE1",
       "interval": "200ms"
     }
   ],

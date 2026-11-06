@@ -107,18 +107,18 @@ class FakeOrchestration:
 class Pure(unittest.TestCase):
     def test_labels_cover_the_plan_table(self):
         exp = docker_experiment()
-        a, b, c, d = (exp.endpoint(n) for n in "ABCD")
+        a, b, c, d = (exp.endpoint(n) for n in ("QoS1", "QoS2", "BE1", "BE2"))
         self.assertEqual(infra.wireguard_labels(exp, a, "tester_x"), {
-            "experiment": "docker-tiny-1g", "tunnel": "ab", "endpoint": "A", "peer": "B",
+            "experiment": "docker-tiny-1g", "tunnel": "ab", "endpoint": "QoS1", "peer": "QoS2",
             "class": "hummingbird", "tunnel_class": "hummingbird", "isd_as": "1-ff00:0:111",
             "node": "tester_x"})
         lb = infra.wireguard_labels(exp, b, "n")
         self.assertEqual((lb["class"], lb["tunnel_class"], lb["peer"]),
-                         ("best_effort", "hummingbird", "A"))
+                         ("best_effort", "hummingbird", "QoS1"))
         lc = infra.wireguard_labels(exp, c, "n")
         self.assertEqual((lc["class"], lc["tunnel_class"], lc["tunnel"]),
                          ("best_effort", "best_effort", "cd"))
-        self.assertEqual(infra.wireguard_labels(exp, d, "n")["peer"], "C")
+        self.assertEqual(infra.wireguard_labels(exp, d, "n")["peer"], "BE1")
 
     def test_grafana_url_window(self):
         exp = docker_experiment()
@@ -194,7 +194,7 @@ class DockerTargets(unittest.TestCase):
         self.assertEqual([t["targets"][0] for t in wg],
                          ["172.20.0.3:28015", "172.20.0.4:28015",
                           "172.20.0.2:28016", "172.20.0.4:28016"])
-        self.assertEqual([t["labels"]["endpoint"] for t in wg], list("ABCD"))
+        self.assertEqual([t["labels"]["endpoint"] for t in wg], ["QoS1", "QoS2", "BE1", "BE2"])
         self.assertEqual(wg[1]["labels"]["node"], "tester_1-ff00_0_112")
         self.assertEqual(wg[0]["labels"]["class"], "hummingbird")
         self.assertEqual(json.loads(docs["targets/runner.json"]),
@@ -224,7 +224,7 @@ class DockerTargets(unittest.TestCase):
         self.assertEqual(i.binary_paths(), {k: "/share/bin/wireguard-go" for k in
                                             ("1-ff00:0:110", "1-ff00:0:111", "1-ff00:0:112")})
         self.assertEqual(i.jwt_paths(), {"1-ff00:0:111": infra.DOCKER_JWT})
-        self.assertEqual(i.sciond_address(i.experiment.endpoint("A")), "[fd00::1]:30255")
+        self.assertEqual(i.sciond_address(i.experiment.endpoint("QoS1")), "[fd00::1]:30255")
         self.assertEqual(i.hosts()["1-ff00:0:111"].commands[-1][0], ["printenv", "SCION_DAEMON"])
 
 
@@ -712,7 +712,7 @@ class SSHFlow(unittest.TestCase):
         ])
         self.assertEqual(sources[0].labels["node"], "rnp")
         self.assertEqual(sources[3].labels, {
-            "experiment": sciera_experiment().name, "tunnel": "cd", "endpoint": "D", "peer": "C",
+            "experiment": sciera_experiment().name, "tunnel": "cd", "endpoint": "BE2", "peer": "BE1",
             "class": "best_effort", "tunnel_class": "best_effort", "isd_as": "71-2:0:5c",
             "node": "ufms"})
         self.assertEqual(sources[5].labels, {"as": "71_1916", "br": "br-2"})
@@ -746,7 +746,7 @@ class SSHFlow(unittest.TestCase):
         self.assertEqual(i.binary_paths(), {k: "/var/tmp/wgexp/setup/wireguard-go"
                                             for k in ("rnp", "ufes", "ufms")})
         self.assertEqual(i.jwt_paths(), {"rnp": "/var/tmp/wgexp/setup/marketplace.jwt"})
-        self.assertEqual(i.sciond_address(i.experiment.endpoint("C")), "127.0.0.1:30255")
+        self.assertEqual(i.sciond_address(i.experiment.endpoint("BE1")), "127.0.0.1:30255")
         self.assertEqual(i.run_dir("ufes"), "/var/tmp/wgexp")
 
     def test_monitoring_steps_use_our_stack(self):

@@ -47,6 +47,7 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,14 +79,36 @@ DOCKER_BINARY = "/share/bin/wireguard-go"
 DOCKER_JWT = "/tmp/hummbwtester-marketplace.jwt"
 DOCKER_RUN_DIR = "/tmp/wgexp"
 SSH_BINARY_MODE = "700"
+# wireguard-go runs as the SSH user; this file capability lets it create its TUN device.
+NET_ADMIN = "cap_net_admin+ep"
+NET_ADMIN_RE = re.compile(r"cap_net_admin[=+]e?p|cap_net_admin[=+]pe")
+# A throwaway device: the check starts wireguard-go on it as the user and waits for its UAPI
+# socket, which it only opens after creating the TUN device.
+CAPABILITY_CHECK_INTERFACE = "wgx-capcheck"
+_CAPABILITY_CHECK = r"""bin=$1; iface=$2; dir=$(mktemp -d) || exit 1
+WG_UAPI_DIR=$dir WG_PROCESS_FOREGROUND=1 "$bin" -f "$iface" >"$dir/log" 2>&1 </dev/null & pid=$!
+ok=0
+for _ in $(seq 50); do
+  if [ -S "$dir/$iface.sock" ]; then ok=1; break; fi
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 0.1
+done
+kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+[ "$ok" = 1 ] || tail -n 5 "$dir/log"
+rm -rf "$dir"
+[ "$ok" = 1 ]
+"""
 
 TARGET_WIREGUARD = "targets/wireguard.json"
 TARGET_RUNNER = "targets/runner.json"
 TARGET_ROUTERS = "targets/border_routers.json"
 TARGET_FILES = (TARGET_WIREGUARD, TARGET_RUNNER, TARGET_ROUTERS)
 
-REQUIRED_TOOLS = ("ip", "rsync", "iperf3", "ping", "sha256sum")
-SSH_REQUIRED_TOOLS = (*REQUIRED_TOOLS, "nc")  # remote.preflight always uses nc for the daemon check
+# Tools every endpoint host needs (device set-up, the tunnel ping check); each workload kind adds its
+# own, only on the hosts at either end of it.
+BASE_TOOLS = ("ip", "ping", "sha256sum")
+WORKLOAD_TOOLS = {"file_copy": ("rsync", "dd"), "iperf3": ("iperf3",), "ping": ()}
+SSH_EXTRA_TOOLS = ("nc",)  # remote.preflight always uses nc for the daemon check
 TINY_DISPATCHED_PORTS = (31000, 32767)
 # One copy on each side, rsync's temporary file, and slack: as in tests/scion-end2end.py.
 DISK_SPACE_FACTOR = 2.5
@@ -216,6 +239,15 @@ def parse_dispatched_ports(spec: Any) -> Optional[tuple[int, int]]:
     if len(parts) != 2 or not all(p.isdigit() for p in parts):
         return None
     return int(parts[0]), int(parts[1])
+
+
+def required_tools(experiment: Experiment, host_key: str) -> tuple[str, ...]:
+    """The tools host_key needs: BASE_TOOLS, plus those of the workloads it is an end of."""
+    tools = list(BASE_TOOLS)
+    for w in experiment.workloads:
+        if host_key in (w.sender.host_key, w.receiver.host_key):
+            tools += [t for t in WORKLOAD_TOOLS.get(w.kind, ()) if t not in tools]
+    return tuple(tools)
 
 
 def host_payload_bytes(experiment: Experiment) -> dict[str, int]:
@@ -419,12 +451,17 @@ class Infra:
         problems: list[str] = []
         if self.check_tools_in_generic:
             script = ('for t in "$@"; do command -v "$t" >/dev/null 2>&1 || echo "$t"; done')
-            result = host.run(["bash", "-c", script, "_", *REQUIRED_TOOLS], check=False)
+            result = host.run(["bash", "-c", script, "_", *required_tools(self.experiment, host_key)],
+                              check=False)
             missing = result.stdout.split()
             if result.returncode != 0 and not missing:
                 missing = ["(could not run the tool check)"]
             if missing:
                 problems.append(f"{name}: missing tools: {', '.join(missing)}")
+        if any(w.kind == "ping" and w.sender.host_key == host_key for w in self.experiment.workloads):
+            if "iputils" not in host.run(["ping", "-V"], check=False).stdout:
+                problems.append(f"{name}: the ping workloads sent from here need iputils ping "
+                                f"(-D, -I <address>); `ping -V` does not report iputils")
         if host.run(["test", "-c", "/dev/net/tun"], check=False).returncode != 0:
             problems.append(f"{name}: /dev/net/tun is not available (WireGuard needs a TUN device)")
         problems += self._root_problems(host, name)
@@ -933,7 +970,8 @@ class SSHInfra(Infra):
 
     def _default_host(self, host_key: str) -> Any:
         import hosts  # lazy: hosts.py is implemented concurrently
-        return hosts.SSHHost(self.inventory.hosts[host_key])
+        # hummbwtester is already loaded: hand its ssh_orchestration over instead of hosts.configure().
+        return hosts.SSHHost(self.inventory.hosts[host_key], orchestration=self.remote)
 
     def _ssh_host(self, node: str) -> Any:
         return self.inventory.hosts[node]
@@ -991,7 +1029,8 @@ class SSHInfra(Infra):
         problems: list[str] = []
         participants = set(self.host_keys())
         for name in sorted(set(self.ss.setup_hosts(inv)) | participants):
-            tools = SSH_REQUIRED_TOOLS if name in participants else self.remote.DEFAULT_REQUIRED_TOOLS
+            tools = ((*required_tools(self.experiment, name), *SSH_EXTRA_TOOLS) if name in participants
+                     else self.remote.DEFAULT_REQUIRED_TOOLS)
             try:
                 self.remote.preflight(inv.hosts[name], self.dry_run, required_tools=tools)
             except (subprocess.SubprocessError, RuntimeError, OSError, ValueError) as err:
@@ -999,9 +1038,22 @@ class SSHInfra(Infra):
         return problems
 
     def _root_problems(self, host: Any, name: str) -> list[str]:
+        problems = []
         if host.run(["true"], check=False, root=True).returncode != 0:
-            return [f"{name}: `sudo -n true` fails; WireGuard and the qdiscs need passwordless sudo"]
-        return []
+            problems.append(f"{name}: `sudo -n true` fails; setup and the `ip` commands on the "
+                            f"tunnel devices need passwordless sudo")
+        # wireguard-go runs as this user with a file capability: it must reach the TUN device, and
+        # the run dir must not be on a nosuid mount, which silently disables file capabilities.
+        if host.run(["test", "-r", "/dev/net/tun", "-a", "-w", "/dev/net/tun"], check=False).returncode:
+            problems.append(f"{name}: /dev/net/tun is not readable and writable by the SSH user")
+        script = ('d="$1"; while [ ! -d "$d" ] && [ "$d" != / ]; do d=$(dirname "$d"); done; '
+                  'findmnt -no OPTIONS -T "$d"')
+        options = host.run(["bash", "-c", script, "_", self._ssh_host(name).run_dir],
+                           check=False).stdout.strip()
+        if "nosuid" in options.split(","):
+            problems.append(f"{name}: {self._ssh_host(name).run_dir} is on a nosuid mount, which "
+                            f"disables the file capability wireguard-go runs with")
+        return problems
 
     def _dispatched_ports(self, host_key: str) -> Optional[tuple[int, int]]:
         path = self.ss.SCION_CONFIG_DIR + "/topology.json"
@@ -1041,11 +1093,36 @@ class SSHInfra(Infra):
                           f"wireguard-go to {key}")
             else:
                 self._say(f"wireguard-go on {key} is current")
+            self._ensure_net_admin(key, paths[key])
 
         failures = self._steps([(f"binary on {k}", lambda k=k: one(k)) for k in paths])
         if failures:
             raise InfraError("; ".join(failures))
         return paths
+
+    def _ensure_net_admin(self, key: str, path: str) -> None:
+        """Give the deployed binary CAP_NET_ADMIN (lost whenever a new copy replaces it), then check
+        that the SSH user can really create a TUN device with it."""
+        host = self._host(key)
+        current = host.run(["getcap", path], check=False).stdout
+        if NET_ADMIN_RE.search(current):
+            self._say(f"wireguard-go on {key} has cap_net_admin")
+        elif self.dry_run:
+            self._say(f"dry-run: would give wireguard-go on {key} {NET_ADMIN}")
+            return
+        else:
+            host.run(["setcap", NET_ADMIN, path], root=True)
+            if not NET_ADMIN_RE.search(host.run(["getcap", path], check=False).stdout):
+                raise InfraError(f"{key}: setcap {NET_ADMIN} {path} did not take effect")
+            self._say(f"gave wireguard-go on {key} {NET_ADMIN}")
+        result = host.run(["bash", "-c", _CAPABILITY_CHECK, "_", path, CAPABILITY_CHECK_INTERFACE],
+                          check=False, timeout=30)
+        # The device goes away with the process; delete it if it did not.
+        host.run(["ip", "link", "del", "dev", CAPABILITY_CHECK_INTERFACE], check=False, root=True)
+        if result.returncode != 0:
+            raise InfraError(f"{key}: wireguard-go cannot create a TUN device as the SSH user "
+                             f"despite {NET_ADMIN}:\n{result.stdout.strip()}")
+        self._say(f"wireguard-go on {key} creates its device as the SSH user")
 
     def install_jwt(self) -> Optional[dict[str, str]]:
         paths = self.jwt_paths()
@@ -1054,7 +1131,15 @@ class SSHInfra(Infra):
         local: Optional[Path] = None
         try:
             # Logging in only reads the marketplace, so a dry run does it too (as hummbwtester).
-            token = self.ss.obtain_marketplace_jwt(self.inventory)
+            # Before the first setup the marketplace is not running yet: a dry run only notes that.
+            try:
+                token = self.ss.obtain_marketplace_jwt(self.inventory)
+            except _RECOVERABLE as err:
+                if not self.dry_run:
+                    raise
+                self._say(f"dry-run: would obtain the marketplace JWT and upload it to "
+                          f"{', '.join(sorted(paths))} (cannot log in yet: {err})")
+                return paths
             local = self.hb.orchestration.write_private_jwt(token)
             for key in sorted(paths):
                 host = self._ssh_host(key)

@@ -28,12 +28,24 @@ const (
 // flag in wireguard-android.
 var socketDirectory = "/var/run/wireguard"
 
+// EnvUAPIDir, if set, replaces socketDirectory: a process without root (e.g. one that only holds
+// CAP_NET_ADMIN) can then put its UAPI socket in a directory it owns.
+const EnvUAPIDir = "WG_UAPI_DIR"
+
+// SocketDir is the directory of the UAPI sockets: $WG_UAPI_DIR, or socketDirectory.
+func SocketDir() string {
+	if dir := os.Getenv(EnvUAPIDir); dir != "" {
+		return dir
+	}
+	return socketDirectory
+}
+
 func sockPath(iface string) string {
-	return fmt.Sprintf("%s/%s.sock", socketDirectory, iface)
+	return fmt.Sprintf("%s/%s.sock", SocketDir(), iface)
 }
 
 func UAPIOpen(name string) (*os.File, error) {
-	if err := os.MkdirAll(socketDirectory, 0o755); err != nil {
+	if err := os.MkdirAll(SocketDir(), 0o755); err != nil {
 		return nil, err
 	}
 

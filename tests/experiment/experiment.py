@@ -283,6 +283,9 @@ class Run:
                 exp, ep, self.hosts[key], binaries[key], infra.run_dir(key), self.run_id,
                 jwts.get(key) if ep.hummingbird else None, infra.sciond_address(ep))
             self.instances[ep.name] = inst
+        # The run directory belongs to the SSH user, who runs the instances and the workloads.
+        for key, host in self.hosts.items():
+            host.run(["mkdir", "-p", "--", f"{infra.run_dir(key).rstrip('/')}/runs/{self.run_id}/work"])
         say(f"starting {len(self.instances)} wireguard-go instances")
         for ep in exp.endpoints:
             inst = self.instances[ep.name]

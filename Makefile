@@ -22,15 +22,18 @@ wireguard-go: $(wildcard *.go) $(wildcard */*.go)
 install: wireguard-go
 	@install -v -d "$(DESTDIR)$(BINDIR)" && install -v -m 0755 "$<" "$(DESTDIR)$(BINDIR)/wireguard-go"
 
+# Run the two suites one after the other even under make -j, so their output does not interleave.
+.NOTPARALLEL: test
 test: test-go test-experiment
 
 test-go:
 	go test ./...
 
 # Unit tests of the experiment runner (tests/experiment). They need no Docker. Tests that need
-# PyYAML, jsonschema or SCION_DIR are skipped without them.
+# PyYAML, jsonschema or SCION_DIR are skipped without them. -b hides the output of passing tests
+# (preflight messages, warnings) and shows it only for the tests that fail.
 test-experiment:
-	python3 -m unittest discover -s tests/experiment -p 'test_*.py'
+	python3 -m unittest discover -b -s tests/experiment -p 'test_*.py'
 
 # Runs every SCION integration test on a running tiny topology. Point it at the
 # checkout holding that topology with SCION_DIR, e.g. make test-integration SCION_DIR=~/scion

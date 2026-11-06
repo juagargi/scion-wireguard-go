@@ -22,6 +22,8 @@ When an interface is running, you may use [`wg(8)`](https://git.zx2c4.com/wiregu
 
 To run with more logging you may set the environment variable `LOG_LEVEL=debug`.
 
+The control socket lives in `/var/run/wireguard`. Set `WG_UAPI_DIR` to put it in another directory instead, e.g. one owned by an unprivileged user that runs wireguard-go with only `CAP_NET_ADMIN` (`setcap cap_net_admin+ep wireguard-go`). `wg(8)` does not look there; talk to the socket directly (e.g. with `socat`).
+
 ## SCION Networking Support
 
 This enhanced version of wireguard-go includes support for [SCION](https://docs.scion.org/) networking, enabling WireGuard tunnels to operate over SCION paths with automatic fallback to regular IP.

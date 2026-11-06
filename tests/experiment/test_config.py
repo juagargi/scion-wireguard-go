@@ -78,14 +78,14 @@ class TestExamples(Base):
         self.assertEqual(e.kind, "docker")
         self.assertEqual(e.name, "docker-tiny-1g")
         self.assertEqual(len(e.sha256), 64)
-        self.assertEqual(e.endpoint("B").host_key, "1-ff00:0:112")
-        self.assertEqual(e.endpoint("D").host_key, "1-ff00:0:112")
-        self.assertEqual(e.peer_of("A").name, "B")
-        self.assertEqual(e.tunnel_of("D").id, "cd")
-        self.assertEqual(e.endpoint("A").interface, "wgx-ab")
-        self.assertEqual(e.endpoint("A").api_bind, "0.0.0.0")
-        self.assertIsNone(e.endpoint("A").host)
-        self.assertIsNone(e.endpoint("A").node)
+        self.assertEqual(e.endpoint("QoS2").host_key, "1-ff00:0:112")
+        self.assertEqual(e.endpoint("BE2").host_key, "1-ff00:0:112")
+        self.assertEqual(e.peer_of("QoS1").name, "QoS2")
+        self.assertEqual(e.tunnel_of("BE2").id, "cd")
+        self.assertEqual(e.endpoint("QoS1").interface, "wgx-ab")
+        self.assertEqual(e.endpoint("QoS1").api_bind, "0.0.0.0")
+        self.assertIsNone(e.endpoint("QoS1").host)
+        self.assertIsNone(e.endpoint("QoS1").node)
         self.assertEqual(e.run.warmup, 30)
         self.assertEqual(e.run.max_duration, 3600)
         self.assertEqual(e.monitoring.scrape_interval_seconds, 1)
@@ -99,34 +99,34 @@ class TestExamples(Base):
         self.assertEqual(copy_wl.size_bytes, 1 << 30)
         self.assertEqual(copy_wl.bwlimit, "reservation")
         self.assertEqual(copy_wl.timeout, 1800)
-        self.assertEqual(copy_wl.sender.name, "A")
+        self.assertEqual(copy_wl.sender.name, "QoS1")
         self.assertIsInstance(be, config.Iperf3)
         self.assertEqual((be.length, be.server_port, be.bandwidth_bps), (900, 5201, 50_000_000))
         self.assertEqual(be.tunnel.id, "cd")
         self.assertIsInstance(ping_ab, config.Ping)
         self.assertAlmostEqual(ping_cd.interval, 0.2)
-        self.assertEqual(e.endpoint("A").hummingbird.bandwidth_bps, 20_000_000)
-        self.assertEqual(e.endpoint("A").hummingbird.env(), {
+        self.assertEqual(e.endpoint("QoS1").hummingbird.bandwidth_bps, 20_000_000)
+        self.assertEqual(e.endpoint("QoS1").hummingbird.env(), {
             "HUMMINGBIRD_BANDWIDTH": "20mbps", "HUMMINGBIRD_REVERSE_BANDWIDTH": "2mbps",
             "HUMMINGBIRD_DURATION": "60s", "HUMMINGBIRD_RENEWAL_AHEAD": "15s",
             "HUMMINGBIRD_RESERVATION_OVERLAP": "10s"})
-        self.assertEqual(e.hummingbird_env("B"), {})
-        self.assertEqual(e.hummingbird_env("A")["HUMMINGBIRD_MARKETPLACE_INSECURE"], "1")
-        self.assertEqual(e.endpoint("A").api_address, "0.0.0.0:28015")
+        self.assertEqual(e.hummingbird_env("QoS2"), {})
+        self.assertEqual(e.hummingbird_env("QoS1")["HUMMINGBIRD_MARKETPLACE_INSECURE"], "1")
+        self.assertEqual(e.endpoint("QoS1").api_address, "0.0.0.0:28015")
 
     def test_sciera_loads(self):
         e = load_config(SCIERA)
         self.assertEqual(e.kind, "ssh")
-        self.assertEqual(e.endpoint("B").host_key, "ufms")
-        self.assertEqual(e.endpoint("D").host_key, "ufms")
-        self.assertEqual(e.endpoint("A").api_bind, "127.0.0.1")
-        self.assertEqual(e.endpoint("A").host, "127.0.0.1")
+        self.assertEqual(e.endpoint("QoS2").host_key, "ufms")
+        self.assertEqual(e.endpoint("BE2").host_key, "ufms")
+        self.assertEqual(e.endpoint("QoS1").api_bind, "127.0.0.1")
+        self.assertEqual(e.endpoint("QoS1").host, "127.0.0.1")
         self.assertEqual(e.deployment.raw, e.raw["deployment"])
-        h = e.endpoint("A").hummingbird
+        h = e.endpoint("QoS1").hummingbird
         self.assertEqual((h.humm_start_offset, h.humm_start_offset_seconds), ("-5s", -5))
         self.assertEqual(h.partial, "71-1916,71-2:0:5c")
         self.assertEqual(e.marketplace.scion_address, "[71-2:0:5c,127.0.0.1]:31888")
-        self.assertEqual(e.hummingbird_env("A")["HUMMINGBIRD_MARKETPLACE_ADDRESS"],
+        self.assertEqual(e.hummingbird_env("QoS1")["HUMMINGBIRD_MARKETPLACE_ADDRESS"],
                          "[71-2:0:5c,127.0.0.1]:31888")
         self.assertEqual(e.marketplace.interfaces["71-2:0:5c"], [0, 104])
 
@@ -156,19 +156,19 @@ class TestExamples(Base):
         t = e.tunnels[0]
         self.assertEqual((t.mtu, t.prefix_len, t.persistent_keepalive, t.use_batch),
                          (1000, 24, 25, True))
-        self.assertEqual(e.endpoint("C").interface, "custom0")
+        self.assertEqual(e.endpoint("BE1").interface, "custom0")
         self.assertEqual(e.workloads[1].length, 900)  # mtu - 100
 
     def test_ipv6_api_address(self):
         def m(r):
             r["tunnels"][0]["endpoints"][0]["api_bind"] = "::1"
         e = parse(self.docker(m))
-        self.assertEqual(e.endpoint("A").api_address, "[::1]:28015")
+        self.assertEqual(e.endpoint("QoS1").api_address, "[::1]:28015")
 
 
 class TestSemanticRules(Base):
     def test_duplicate_endpoint_name(self):
-        self.assertInvalid(self.docker(lambda r: r["tunnels"][1]["endpoints"][0].update(name="A")),
+        self.assertInvalid(self.docker(lambda r: r["tunnels"][1]["endpoints"][0].update(name="QoS1")),
                            "tunnels[1].endpoints[0].name", "duplicate")
 
     def test_duplicate_tunnel_id(self):
@@ -184,11 +184,11 @@ class TestSemanticRules(Base):
                            "workloads[0].to", "unknown endpoint")
 
     def test_workload_ends_of_different_tunnels(self):
-        self.assertInvalid(self.docker(lambda r: r["workloads"][0].update(to="D")),
+        self.assertInvalid(self.docker(lambda r: r["workloads"][0].update(to="BE2")),
                            "workloads[0].to", "other end")
 
     def test_workload_to_itself(self):
-        self.assertInvalid(self.docker(lambda r: r["workloads"][0].update(to="A")),
+        self.assertInvalid(self.docker(lambda r: r["workloads"][0].update(to="QoS1")),
                            "workloads[0].to")
 
     def test_duplicate_listen_port_same_host(self):
@@ -279,13 +279,13 @@ class TestSemanticRules(Base):
     def test_bwlimit_reservation_needs_reserved_sender(self):
         def m(r):
             w = r["workloads"][0]
-            w.update({"from": "B", "to": "A"})
-        self.assertInvalid(self.docker(m), "workloads[0].bwlimit", "'B'")
+            w.update({"from": "QoS2", "to": "QoS1"})
+        self.assertInvalid(self.docker(m), "workloads[0].bwlimit", "'QoS2'")
 
     def test_bwlimit_default_without_reservation_is_none(self):
         def m(r):
             w = r["workloads"][0]
-            w.update({"from": "B", "to": "A"})
+            w.update({"from": "QoS2", "to": "QoS1"})
             del w["bwlimit"]
         self.assertEqual(parse(self.docker(m)).workloads[0].bwlimit, "none")
 

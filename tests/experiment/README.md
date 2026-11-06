@@ -50,8 +50,8 @@ python3 tests/experiment/experiment.py run   --config tests/experiment/experimen
 python3 tests/experiment/experiment.py teardown --config tests/experiment/experiment-docker.json
 ```
 
-The configuration: tunnel `ab` (A in AS 111, B in AS 112) with a Hummingbird reservation of 20 mbps
-copies 1 GiB, rsync limited to the reservation; tunnel `cd` (C in 110, D in 112, same container as B)
+The configuration: tunnel `ab` (QoS1 in AS 111, QoS2 in AS 112) with a Hummingbird reservation of 20 mbps
+copies 1 GiB, rsync limited to the reservation; tunnel `cd` (BE1 in 110, BE2 in 112, same container as QoS2)
 sends UDP iperf3 at 50 mbps as best-effort load; both inter-AS links are shaped to 50 mbit.
 
 The regular cycle afterwards: `setup` once per `./scion.sh stop`/start (it is idempotent, a second one
@@ -103,7 +103,7 @@ section, ...), with errors that name the JSON path. Sections: `name`, `informati
   `mtu` - 28.
 - **Tunnel `mtu`** is 1000 on the tiny topology: its 110-111 link has an MTU of 1280, and the
   SCION and Hummingbird headers take the rest. Raise it only if the path's header length is known.
-- Endpoint `path_filter`s pin each tunnel to a path; B and D share one container and are told apart by
+- Endpoint `path_filter`s pin each tunnel to a path; QoS2 and BE2 share one container and are told apart by
   interface, `listen_port` and `api_port` (`SCION_PATH_API_ADDRESS`).
 - `run.max_duration` caps a run; every primary `timeout` must be at most that.
 - `deployment` and `hummingbird.marketplace` use exactly hummbwtester's fields (its parsers reject
@@ -181,6 +181,6 @@ SCION_DIR=$SCION PATH=/tmp/wgexp-venv/bin:$PATH make test-experiment
   `/tmp/wgexp/runs/<run_id>/work/` in the containers.
 - **Known issue**: during a 1 GiB run both wireguard-go ends once stalled for about 5 minutes with
   `no path to ... matches its path filter: no path found`, until the path filter was re-applied. The cause is unconfirmed; if it recurs, keep the `wg-*.log` files.
-- **Never `pkill` by name** (`wireguard-go`, `rsync`, `iperf3`) in testers: B and D share a container,
+- **Never `pkill` by name** (`wireguard-go`, `rsync`, `iperf3`) in testers: QoS2 and BE2 share a container,
   and the runner tracks its processes by pidfile. Use `teardown`, which stops only what it started.
 - Leftover `wgx-*` devices or processes after a crash: `teardown` removes them.

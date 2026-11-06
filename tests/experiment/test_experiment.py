@@ -204,7 +204,7 @@ class RunTest(unittest.TestCase):
         FakeInstance.created = []
         FakeRunner.behaviour = {}
         self.servers = []
-        patcher = mock.patch.object(wireguard, "bring_up_tunnel", return_value={"A": "in use"})
+        patcher = mock.patch.object(wireguard, "bring_up_tunnel", return_value={"QoS1": "in use"})
         self.bring_up = patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -244,14 +244,24 @@ class RunTest(unittest.TestCase):
         self.assertTrue(self.servers[0].started and self.servers[0].stopped)
         self.assertEqual(self.servers[0].bind, "127.0.0.1")
         self.assertEqual(self.servers[0].port, 9189)
-        self.assertTrue((Path(self.tmp.name) / "rid" / "wg-A.log").is_file())
+        self.assertTrue((Path(self.tmp.name) / "rid" / "wg-QoS1.log").is_file())
         # the receivers were prepared before anything started; only the sender has a JWT
         self.assertEqual({i.endpoint.name: i.jwt_path for i in FakeInstance.created},
-                         {"A": "/tmp/jwt", "B": None, "C": None, "D": None})
+                         {"QoS1": "/tmp/jwt", "QoS2": None, "BE1": None, "BE2": None})
         # bwlimit source: the sender's reservation
         self.assertEqual(run.runners["copy-1g"].reservation, 20_000_000)
         self.assertEqual(sorted(r.index for r in run.runners.values() if r.w.kind == "file_copy"), [0])
         self.assertIn("PASS", self.output)
+
+    def test_run_dir_is_made_by_the_user_before_the_instances(self):
+        # wireguard-go's root launcher would otherwise create it, owned by root, and the workloads
+        # (not root) could not write into it.
+        order = []
+        start = FakeInstance.start
+        with mock.patch.object(FakeInstance, "start", lambda self: order.append("start") or start(self)):
+            _, _, _, infra = self.run_()
+        for host in infra.hosts().values():
+            self.assertIn(["mkdir", "-p", "--", "/tmp/wgexp/runs/rid/work"], host.commands)
 
     def test_leftovers_removed_first_only_ours(self):
         _, _, _, infra = self.run_()
@@ -286,7 +296,7 @@ class RunTest(unittest.TestCase):
         outcome = experiment.to_outcome(res, wl, interrupted=False, timed_out=False)
         self.assertEqual(outcome.state, "timeout")
         self.assertEqual(outcome.tunnel, "ab")
-        self.assertEqual((outcome.from_, outcome.to), ("A", "B"))
+        self.assertEqual((outcome.from_, outcome.to), ("QoS1", "QoS2"))
 
     def test_interrupt_cleans_up_and_marks_interrupted(self):
         FakeRunner.behaviour = {"copy-1g": "hang"}
@@ -329,8 +339,8 @@ class RunTest(unittest.TestCase):
         FakeRunner.behaviour = {"copy-1g": "hang"}
         original = FakeInstance.alive
         with mock.patch.object(FakeInstance, "alive",
-                               lambda self: False if self.endpoint.name == "B" and self.started
-                               and sum(i.endpoint.name == "B" for i in FakeInstance.created) else True):
+                               lambda self: False if self.endpoint.name == "QoS2" and self.started
+                               and sum(i.endpoint.name == "QoS2" for i in FakeInstance.created) else True):
             rc, results, _, _ = self.run_()
         self.assertEqual(rc, 1)
         self.assertIn("died during the run", self.output)
@@ -339,8 +349,8 @@ class RunTest(unittest.TestCase):
     def test_reservation_metrics_are_counted(self):
         _, _, run, _ = self.run_()
         text = run.metrics.registry.render()
-        self.assertIn('wgexp_reservations_total{endpoint="A",result="ok"} 2', text)
-        self.assertIn('wgexp_reservations_total{endpoint="A",result="failed"} 1', text)
+        self.assertIn('wgexp_reservations_total{endpoint="QoS1",result="ok"} 2', text)
+        self.assertIn('wgexp_reservations_total{endpoint="QoS1",result="failed"} 1', text)
 
 
 class CliTest(unittest.TestCase):

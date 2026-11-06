@@ -665,8 +665,22 @@ class SSHFlow(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def make(self, dry_run=False, **kwargs):
+        # Never a real SSHHost: a test must not reach the SCIERA hosts. Commands go to FakeHosts
+        # (kept in self.hosts) unless the test passes its own factory.
+        self.hosts = {}
+
+        def fake(key):
+            self.hosts[key] = FakeHost(key, self.answer)
+            return self.hosts[key]
+        kwargs.setdefault("host_factory", fake)
         return infra.SSHInfra(sciera_experiment(), Path(SCION_DIR), dry_run, hb=self.hb,
                               gen_dir=Path(self.tmp.name), **kwargs)
+
+    @staticmethod
+    def answer(argv, root):
+        if argv[:1] == ["getcap"]:
+            return 0, f"{argv[1]} cap_net_admin=ep\n"
+        return 0, ""
 
     def test_inventory(self):
         i = self.make()
@@ -852,6 +866,60 @@ class SSHFlow(unittest.TestCase):
         self.assertEqual((jwt[0][0], jwt[0][2], jwt[0][3]), ("rnp", "/var/tmp/wgexp/setup/marketplace.jwt", "600"))
         self.assertEqual(jwt[0][5], 0o600)  # the controller's copy is private
         self.assertEqual(paths, {"rnp": "/var/tmp/wgexp/setup/marketplace.jwt"})
+
+    def test_binary_gets_net_admin_and_is_checked(self):
+        ss = self.hb.ssh_setup
+        binary = Path(self.tmp.name) / "wg"
+        binary.write_bytes(b"x")
+        capped = set()
+
+        def factory(key):
+            def answer(argv, root):  # each host has its own copy of the binary
+                if argv[:1] == ["getcap"]:
+                    return 0, f"{argv[1]} cap_net_admin=ep\n" if key in capped else ""
+                if argv[:1] == ["setcap"]:
+                    capped.add(key)
+                return 0, ""
+            self.hosts[key] = FakeHost(key, answer)
+            return self.hosts[key]
+        i = self.make(host_factory=factory)
+        with mock.patch.object(ss, "copy_if_changed", lambda *a: True), mock.patch("builtins.print"):
+            i.install_binary(binary)
+        self.assertEqual(capped, {"rnp", "ufes", "ufms"})
+        cmds = self.hosts["ufms"].commands
+        self.assertIn((["setcap", "cap_net_admin+ep", "/var/tmp/wgexp/setup/wireguard-go"], True), cmds)
+        check = [c for c, root in cmds if c[:2] == ["bash", "-c"] and "WG_UAPI_DIR" in c[2]]
+        self.assertEqual(check[0][4:], ["/var/tmp/wgexp/setup/wireguard-go", "wgx-capcheck"])
+        self.assertFalse([root for c, root in cmds if c[:2] == ["bash", "-c"]][0])  # as the user
+        self.assertIn((["ip", "link", "del", "dev", "wgx-capcheck"], True), cmds)
+
+    def test_failing_capability_check_fails_setup(self):
+        def answer(argv, root):
+            if argv[:1] == ["getcap"]:
+                return 0, f"{argv[1]} cap_net_admin=ep\n"
+            if argv[:2] == ["bash", "-c"] and "WG_UAPI_DIR" in argv[2]:
+                return 1, "Failed to create TUN device: operation not permitted"
+            return 0, ""
+        self.answer = answer
+        binary = Path(self.tmp.name) / "wg"
+        binary.write_bytes(b"x")
+        i = self.make()
+        with mock.patch.object(self.hb.ssh_setup, "copy_if_changed", lambda *a: False), \
+                mock.patch("builtins.print"):
+            with self.assertRaises(infra.InfraError) as cm:
+                i.install_binary(binary)
+        self.assertIn("cannot create a TUN device", str(cm.exception))
+
+    def test_dry_run_does_not_setcap(self):
+        self.answer = lambda argv, root: (0, "")
+        binary = Path(self.tmp.name) / "wg"
+        binary.write_bytes(b"x")
+        i = self.make(dry_run=True)
+        with mock.patch.object(self.hb.ssh_setup, "copy_if_changed", lambda *a: True), \
+                mock.patch("builtins.print"):
+            i.install_binary(binary)
+        for host in self.hosts.values():
+            self.assertFalse([c for c, _ in host.commands if c[:1] == ["setcap"] or c[:2] == ["bash", "-c"]])
 
     def test_preflight_uses_remote_preflight_and_checks(self):
         remote, ss = self.hb.remote, self.hb.ssh_setup

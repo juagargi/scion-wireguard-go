@@ -10,8 +10,12 @@ Layout on the host, for one instance of endpoint E, run <id>, run dir <run_dir>:
                                             SSH: <run_dir>/setup/wireguard-go); the integrator installs it
     <run_dir>/runs/<id>/wg-<E>.log          stdout+stderr of wireguard-go (LOG_LEVEL=verbose)
     <run_dir>/runs/<id>/wg-<E>.pid          pid, as recorded by the launcher
-    /var/run/wireguard/<interface>.sock     UAPI socket (created by wireguard-go)
+    <run_dir>/uapi/<interface>.sock         UAPI socket (created by wireguard-go, see WG_UAPI_DIR)
     jwt_path                                the marketplace JWT, mode 600 (never in argv, see start())
+
+wireguard-go runs as the host's user, not root: on SSH hosts the binary carries cap_net_admin (a
+file capability set by setup), and in Docker the tester user is root anyway. Only the `ip` commands
+on the tunnel device (address, MTU, up, delete) run as root, through Host.run(root=True).
 
 Where the integrator has to be careful:
 
@@ -98,7 +102,10 @@ def generate_keypair() -> tuple[str, str]:
 # UAPI
 # ---------------------------------------------------------------------------------------------
 
-UAPI_DIR = "/var/run/wireguard"
+def uapi_dir(run_dir: str) -> str:
+    """Where the instances of a run dir put their UAPI sockets (WG_UAPI_DIR): a directory the
+    user owns, since an unprivileged wireguard-go cannot write to /var/run/wireguard."""
+    return f"{run_dir.rstrip('/')}/uapi"
 
 # The tester image carries neither socat nor nc (nor sh), but ships perl, whose IO::Socket::UNIX is
 # a core module. The program is passed as `perl -e`, so there is no helper file to leave behind.
@@ -231,7 +238,7 @@ class WireguardInstance:
         self.tunnel: Tunnel = experiment.tunnel_of(endpoint.name)
         self.peer: Endpoint = experiment.peer_of(endpoint.name)
         self.private_key, self.public_key = generate_keypair()
-        self.socket_path = f"{UAPI_DIR}/{endpoint.interface}.sock"
+        self.socket_path = f"{uapi_dir(self.run_dir)}/{endpoint.interface}.sock"
         self._local_address: str | None = None
         self._uapi_client: list[str] | None = None
         self._started = False
@@ -268,6 +275,7 @@ class WireguardInstance:
             "USE_BATCH": "1" if tunnel.use_batch else "0",
             "LOG_LEVEL": "verbose",
             "WG_PROCESS_FOREGROUND": "1",
+            "WG_UAPI_DIR": uapi_dir(self.run_dir),
             "SCION_DAEMON_ADDRESS": self.sciond,
             "SCION_LOCAL_IA": f"{ep.isd_as},{self.scion_host}",
             "SCION_PATH_API_ADDRESS": ep.api_address,
@@ -280,7 +288,7 @@ class WireguardInstance:
 
     # -- lifecycle -----------------------------------------------------------------------------
     def start(self) -> int:
-        """Start wireguard-go detached as root. Returns its pid. The JWT never touches an argv:
+        """Start wireguard-go detached, as the host's user. Returns its pid. The JWT never touches an argv:
         the launcher shell on the host reads it from jwt_path (`env_from_files`)."""
         ep = self.endpoint
         if self.host.run(["ip", "link", "show", "dev", ep.interface], check=False,
@@ -297,12 +305,12 @@ class WireguardInstance:
             files["SCION_MARKETPLACE_JWT"] = self.jwt_path
         pid = self.host.start_daemon(
             [self.binary, "-f", ep.interface], env=self.env(), env_from_files=files,
-            log_path=self.log_path, pid_path=self.pid_path, root=True)
+            log_path=self.log_path, pid_path=self.pid_path)
         self._started = True
         return pid
 
     def alive(self) -> bool:
-        return self.host.daemon_alive(self.pid_path, root=True)
+        return self.host.daemon_alive(self.pid_path)
 
     def log_text(self) -> str:
         try:
@@ -321,7 +329,7 @@ class WireguardInstance:
                 raise WireguardError(f"wireguard-go for {self.endpoint.name} on {self.host.name} "
                                      f"exited before it was ready; log {self.log_path}:\n"
                                      f"{self.log_tail()}")
-            if self.host.run(["test", "-S", self.socket_path], check=False, root=True).returncode == 0:
+            if self.host.run(["test", "-S", self.socket_path], check=False).returncode == 0:
                 return
             if time.monotonic() >= deadline:
                 raise WireguardError(f"wireguard-go for {self.endpoint.name} on {self.host.name} "
@@ -337,7 +345,7 @@ class WireguardInstance:
                 raise WireguardError(f"{self.host.name} has no way to reach {self.socket_path} "
                                      f"(needs perl with IO::Socket::UNIX, socat or nc -U)")
             self._uapi_client = _CLIENTS[tool](self.socket_path)
-        result = self.host.run(self._uapi_client, input=request, check=False, root=True)
+        result = self.host.run(self._uapi_client, input=request, check=False)
         if result.returncode != 0:
             raise WireguardError(f"UAPI request to {self.endpoint.name} on {self.host.name} failed: "
                                  f"{(result.stderr or result.stdout).strip()}")
@@ -491,10 +499,10 @@ class WireguardInstance:
     # -- teardown ------------------------------------------------------------------------------
     def stop(self) -> bool:
         """Stop by pidfile only; delete only this instance's interface and socket. True if it ran."""
-        ran = self.host.stop_daemon(self.pid_path, root=True)
+        ran = self.host.stop_daemon(self.pid_path)
         if self._started or ran:
             self.host.run(["ip", "link", "del", "dev", self.endpoint.interface], check=False, root=True)
-            self.host.run(["rm", "-f", "--", self.socket_path], check=False, root=True)
+            self.host.run(["rm", "-f", "--", self.socket_path], check=False)
         self._started = False
         return ran
 
@@ -557,14 +565,14 @@ def cleanup_leftovers(host: Host, run_dir: str, interfaces: list[str]) -> list[s
     Returns what was stopped/removed."""
     done: list[str] = []
     found = host.run(["bash", "-c", 'compgen -G "$1/runs/*/wg-*.pid" || true', "bash", run_dir.rstrip("/")],
-                     check=False, root=True).stdout.split()
+                     check=False).stdout.split()
     for pid_path in found:
-        if host.stop_daemon(pid_path, root=True):
+        if host.stop_daemon(pid_path):
             done.append(pid_path)
     for interface in interfaces:
         if not interface.startswith("wgx-"):
             continue
         if host.run(["ip", "link", "del", "dev", interface], check=False, root=True).returncode == 0:
             done.append(interface)
-        host.run(["rm", "-f", "--", f"{UAPI_DIR}/{interface}.sock"], check=False, root=True)
+        host.run(["rm", "-f", "--", f"{uapi_dir(run_dir)}/{interface}.sock"], check=False)
     return done

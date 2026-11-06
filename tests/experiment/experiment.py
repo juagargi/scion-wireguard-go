@@ -162,10 +162,9 @@ def remove_leftovers(infra: Any, experiment: Experiment, run_dir_cleanup: bool =
             for pid_path in found:
                 if host.stop_daemon(pid_path):
                     say(f"cleanup: {host.name}: stopped {pid_path}")
-            # root: the run directories hold the root-owned logs and pidfiles of wireguard-go
-            host.run(["rm", "-rf", "--", f"{run_dir.rstrip('/')}/runs"], check=False, root=True)
+            host.run(["rm", "-rf", "--", f"{run_dir.rstrip('/')}/runs"], check=False)
             if run_dir_cleanup:
-                host.run(["rm", "-rf", "--", run_dir], check=False, root=True)
+                host.run(["rm", "-rf", "--", run_dir], check=False)
         except Exception as err:  # noqa: BLE001
             problems.append(f"{key}: {err}")
             say(f"cleanup: {key}: {err}")
@@ -284,8 +283,7 @@ class Run:
                 exp, ep, self.hosts[key], binaries[key], infra.run_dir(key), self.run_id,
                 jwts.get(key) if ep.hummingbird else None, infra.sciond_address(ep))
             self.instances[ep.name] = inst
-        # The run directory belongs to the SSH user: the workloads write into it without root. Made
-        # before the instances, whose root launcher would otherwise create it (owned by root).
+        # The run directory belongs to the SSH user, who runs the instances and the workloads.
         for key, host in self.hosts.items():
             host.run(["mkdir", "-p", "--", f"{infra.run_dir(key).rstrip('/')}/runs/{self.run_id}/work"])
         say(f"starting {len(self.instances)} wireguard-go instances")
@@ -506,7 +504,7 @@ class Run:
         for key, host in self.hosts.items():
             try:
                 host.run(["rm", "-rf", "--", f"{self.infra.run_dir(key).rstrip('/')}/runs/{self.run_id}"],
-                         check=False, root=True)
+                         check=False)
             except Exception as err:  # noqa: BLE001
                 problems.append(f"{key}: {err}")
         for problem in problems:

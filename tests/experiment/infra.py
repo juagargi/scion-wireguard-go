@@ -47,6 +47,7 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,25 @@ DOCKER_BINARY = "/share/bin/wireguard-go"
 DOCKER_JWT = "/tmp/hummbwtester-marketplace.jwt"
 DOCKER_RUN_DIR = "/tmp/wgexp"
 SSH_BINARY_MODE = "700"
+# wireguard-go runs as the SSH user; this file capability lets it create its TUN device.
+NET_ADMIN = "cap_net_admin+ep"
+NET_ADMIN_RE = re.compile(r"cap_net_admin[=+]e?p|cap_net_admin[=+]pe")
+# A throwaway device: the check starts wireguard-go on it as the user and waits for its UAPI
+# socket, which it only opens after creating the TUN device.
+CAPABILITY_CHECK_INTERFACE = "wgx-capcheck"
+_CAPABILITY_CHECK = r"""bin=$1; iface=$2; dir=$(mktemp -d) || exit 1
+WG_UAPI_DIR=$dir WG_PROCESS_FOREGROUND=1 "$bin" -f "$iface" >"$dir/log" 2>&1 </dev/null & pid=$!
+ok=0
+for _ in $(seq 50); do
+  if [ -S "$dir/$iface.sock" ]; then ok=1; break; fi
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 0.1
+done
+kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+[ "$ok" = 1 ] || tail -n 5 "$dir/log"
+rm -rf "$dir"
+[ "$ok" = 1 ]
+"""
 
 TARGET_WIREGUARD = "targets/wireguard.json"
 TARGET_RUNNER = "targets/runner.json"
@@ -1018,9 +1038,22 @@ class SSHInfra(Infra):
         return problems
 
     def _root_problems(self, host: Any, name: str) -> list[str]:
+        problems = []
         if host.run(["true"], check=False, root=True).returncode != 0:
-            return [f"{name}: `sudo -n true` fails; WireGuard and the qdiscs need passwordless sudo"]
-        return []
+            problems.append(f"{name}: `sudo -n true` fails; setup and the `ip` commands on the "
+                            f"tunnel devices need passwordless sudo")
+        # wireguard-go runs as this user with a file capability: it must reach the TUN device, and
+        # the run dir must not be on a nosuid mount, which silently disables file capabilities.
+        if host.run(["test", "-r", "/dev/net/tun", "-a", "-w", "/dev/net/tun"], check=False).returncode:
+            problems.append(f"{name}: /dev/net/tun is not readable and writable by the SSH user")
+        script = ('d="$1"; while [ ! -d "$d" ] && [ "$d" != / ]; do d=$(dirname "$d"); done; '
+                  'findmnt -no OPTIONS -T "$d"')
+        options = host.run(["bash", "-c", script, "_", self._ssh_host(name).run_dir],
+                           check=False).stdout.strip()
+        if "nosuid" in options.split(","):
+            problems.append(f"{name}: {self._ssh_host(name).run_dir} is on a nosuid mount, which "
+                            f"disables the file capability wireguard-go runs with")
+        return problems
 
     def _dispatched_ports(self, host_key: str) -> Optional[tuple[int, int]]:
         path = self.ss.SCION_CONFIG_DIR + "/topology.json"
@@ -1060,11 +1093,36 @@ class SSHInfra(Infra):
                           f"wireguard-go to {key}")
             else:
                 self._say(f"wireguard-go on {key} is current")
+            self._ensure_net_admin(key, paths[key])
 
         failures = self._steps([(f"binary on {k}", lambda k=k: one(k)) for k in paths])
         if failures:
             raise InfraError("; ".join(failures))
         return paths
+
+    def _ensure_net_admin(self, key: str, path: str) -> None:
+        """Give the deployed binary CAP_NET_ADMIN (lost whenever a new copy replaces it), then check
+        that the SSH user can really create a TUN device with it."""
+        host = self._host(key)
+        current = host.run(["getcap", path], check=False).stdout
+        if NET_ADMIN_RE.search(current):
+            self._say(f"wireguard-go on {key} has cap_net_admin")
+        elif self.dry_run:
+            self._say(f"dry-run: would give wireguard-go on {key} {NET_ADMIN}")
+            return
+        else:
+            host.run(["setcap", NET_ADMIN, path], root=True)
+            if not NET_ADMIN_RE.search(host.run(["getcap", path], check=False).stdout):
+                raise InfraError(f"{key}: setcap {NET_ADMIN} {path} did not take effect")
+            self._say(f"gave wireguard-go on {key} {NET_ADMIN}")
+        result = host.run(["bash", "-c", _CAPABILITY_CHECK, "_", path, CAPABILITY_CHECK_INTERFACE],
+                          check=False, timeout=30)
+        # The device goes away with the process; delete it if it did not.
+        host.run(["ip", "link", "del", "dev", CAPABILITY_CHECK_INTERFACE], check=False, root=True)
+        if result.returncode != 0:
+            raise InfraError(f"{key}: wireguard-go cannot create a TUN device as the SSH user "
+                             f"despite {NET_ADMIN}:\n{result.stdout.strip()}")
+        self._say(f"wireguard-go on {key} creates its device as the SSH user")
 
     def install_jwt(self) -> Optional[dict[str, str]]:
         paths = self.jwt_paths()

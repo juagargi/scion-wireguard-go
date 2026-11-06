@@ -100,9 +100,10 @@ class TestEnv(unittest.TestCase):
     def test_sender_env_in_order(self):
         inst = instance("A")
         env = inst.env()
-        self.assertEqual(list(env)[:7], ["USE_SCION", "USE_BATCH", "LOG_LEVEL", "WG_PROCESS_FOREGROUND",
-                                         "SCION_DAEMON_ADDRESS", "SCION_LOCAL_IA",
+        self.assertEqual(list(env)[:8], ["USE_SCION", "USE_BATCH", "LOG_LEVEL", "WG_PROCESS_FOREGROUND",
+                                         "WG_UAPI_DIR", "SCION_DAEMON_ADDRESS", "SCION_LOCAL_IA",
                                          "SCION_PATH_API_ADDRESS"])
+        self.assertEqual(env["WG_UAPI_DIR"], "/tmp/wgexp/uapi")
         self.assertEqual(env["USE_SCION"], "1")
         self.assertEqual(env["USE_BATCH"], "1")
         self.assertEqual(env["LOG_LEVEL"], "verbose")
@@ -150,7 +151,7 @@ class TestStart(unittest.TestCase):
         self.assertEqual(d["argv"], ["/share/bin/wireguard-go", "-f", "wgx-ab"])
         self.assertEqual(d["files"], {"SCION_MARKETPLACE_JWT": JWT})
         self.assertNotIn("SCION_MARKETPLACE_JWT", d["env"])
-        self.assertTrue(d["root"])
+        self.assertFalse(d["root"])  # the binary carries cap_net_admin; only `ip` needs root
         self.assertEqual(d["log"], "/tmp/wgexp/runs/run1/wg-A.log")
         self.assertEqual(d["pid"], "/tmp/wgexp/runs/run1/wg-A.pid")
 
@@ -261,8 +262,8 @@ class TestUapi(unittest.TestCase):
         inst.uapi("get=1\n\n")
         self.assertEqual(sum(1 for c in host.calls if c[0][0] == "bash"), 1)
         perl = [c for c in host.calls if c[0][0] == "perl"][0]
-        self.assertEqual(perl[0][-1], "/var/run/wireguard/wgx-ab.sock")
-        self.assertTrue(perl[2])  # root
+        self.assertEqual(perl[0][-1], "/tmp/wgexp/uapi/wgx-ab.sock")
+        self.assertFalse(perl[2])  # the socket belongs to the user
 
     def test_no_uapi_tool(self):
         with self.assertRaises(WireguardError):
@@ -429,7 +430,10 @@ class TestStop(unittest.TestCase):
         self.assertEqual(host.stopped, ["/tmp/wgexp/runs/run1/wg-A.pid"])
         cmds = [c[0] for c in host.calls]
         self.assertIn(["ip", "link", "del", "dev", "wgx-ab"], cmds)
-        self.assertIn(["rm", "-f", "--", "/var/run/wireguard/wgx-ab.sock"], cmds)
+        self.assertIn(["rm", "-f", "--", "/tmp/wgexp/uapi/wgx-ab.sock"], cmds)
+        roots = {tuple(c[0][:3]): c[2] for c in host.calls}
+        self.assertTrue(roots[("ip", "link", "del")])
+        self.assertFalse(roots[("rm", "-f", "--")])
 
     def test_cleanup_leftovers_spares_foreign_interfaces(self):
         host = FakeHost()

@@ -647,7 +647,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "iperf3 UDP datagrams lost per minute, and underlay packets one endpoint sent minus those its peer received.",
+      "description": "Duration of each successful marketplace purchase (search, buy, redeem), one point per purchase, as in hummbwtester's Market Roundtrip. Computed from the purchase histogram's sum and count over each interval; if one interval holds several purchases, the point is their mean.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -657,95 +657,17 @@
             "drawStyle": "line",
             "fillOpacity": 0,
             "lineWidth": 2,
-            "showPoints": "auto",
-            "spanNulls": false
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
           },
-          "unit": "short"
+          "unit": "s",
+          "decimals": 3
         },
         "overrides": []
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "id": 110,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "sum by (tunnel, from, to) (increase(wgexp_iperf3_lost_datagrams_total{tunnel=~\"$tunnel\"}[1m]))",
-          "legendFormat": "{{tunnel}} {{from}}->{{to}} iperf3 lost",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "editorMode": "code",
-          "expr": "sum by (tunnel, endpoint) (increase(wireguard_sent_packets_total{tunnel=~\"$tunnel\"}[1m])) - on (tunnel, endpoint) sum by (tunnel, endpoint) (label_replace(increase(wireguard_received_packets_total{tunnel=~\"$tunnel\"}[1m]), \"endpoint\", \"$1\", \"peer\", \"(.*)\"))",
-          "legendFormat": "{{tunnel}} {{endpoint}} underlay gap",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "Best-effort loss per minute",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "description": "p95 duration of marketplace purchases (search, buy, redeem) and the number of purchases per minute, by result.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* per min$"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "short"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "custom.drawStyle",
-                "value": "bars"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "x": 12,
         "y": 24,
         "w": 12,
         "h": 8
@@ -753,7 +675,11 @@
       "id": 111,
       "options": {
         "legend": {
-          "calcs": [],
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
           "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
@@ -765,75 +691,20 @@
       },
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, tunnel, endpoint, result) (rate(wireguard_reservation_setup_duration_seconds_bucket{tunnel=~\"$tunnel\"}[1m])))",
-          "legendFormat": "{{tunnel}} {{endpoint}} {{result}} p95",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "editorMode": "code",
-          "expr": "sum by (tunnel, endpoint, result) (increase(wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\"}[1m]))",
-          "legendFormat": "{{tunnel}} {{endpoint}} {{result}} per min",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "Reservation setup",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "description": "Reservations the runner counted from the senders' logs, per minute, by result.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
           },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "lineWidth": 2,
-            "showPoints": "auto",
-            "spanNulls": false
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 32,
-        "w": 12,
-        "h": 8
-      },
-      "id": 112,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
           "editorMode": "code",
-          "expr": "sum by (endpoint, result) (increase(wgexp_reservations_total[1m]))",
-          "legendFormat": "{{endpoint}} {{result}}",
+          "expr": "(wireguard_reservation_setup_duration_seconds_sum{tunnel=~\"$tunnel\",result=\"ok\"} - (wireguard_reservation_setup_duration_seconds_sum{tunnel=~\"$tunnel\",result=\"ok\"} offset $__interval or wireguard_reservation_setup_duration_seconds_sum{tunnel=~\"$tunnel\",result=\"ok\"} * 0)) / ((wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\",result=\"ok\"} - (wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\",result=\"ok\"} offset $__interval or wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\",result=\"ok\"} * 0)) > 0)",
+          "legendFormat": "{{tunnel}} {{endpoint}} roundtrip",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Reservations bought",
-      "type": "timeseries"
+      "title": "Marketplace roundtrip",
+      "type": "timeseries",
+      "interval": "1s"
     },
     {
       "datasource": {
@@ -859,7 +730,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 32,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -943,7 +814,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 32
       },
       "id": 14,
       "options": {
@@ -1006,7 +877,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 32
       },
       "id": 15,
       "options": {
@@ -1115,7 +986,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 48
+        "y": 40
       },
       "id": 8,
       "options": {
@@ -1192,7 +1063,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 48
+        "y": 40
       },
       "id": 10,
       "options": {
@@ -1282,7 +1153,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 56
+        "y": 48
       },
       "id": 11,
       "options": {
@@ -1388,7 +1259,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 56
+        "y": 48
       },
       "id": 12,
       "options": {
@@ -1494,7 +1365,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 64
+        "y": 56
       },
       "id": 9,
       "options": {
@@ -1593,7 +1464,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 64
+        "y": 56
       },
       "id": 7,
       "options": {
@@ -1678,7 +1549,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 72
+        "y": 64
       },
       "id": 16,
       "options": {
@@ -1747,7 +1618,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 80
+        "y": 72
       },
       "id": 17,
       "options": {
@@ -1808,7 +1679,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 80
+        "y": 72
       },
       "id": 18,
       "options": {

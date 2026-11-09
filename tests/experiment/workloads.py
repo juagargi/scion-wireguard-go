@@ -629,6 +629,9 @@ class Iperf3Runner(WorkloadRunner):
         lost, total = max(0, iv.lost or 0), iv.total
         self.datagrams += total
         self.lost += lost
+        # UDP does not retransmit: count what arrived, not what the client sent, so that
+        # bytes and goodput are the receiver's.
+        self._add_bytes((total - lost) * w.length if w.length else iv.bytes)
         self.m_dgrams.inc(total)
         self.m_lost.inc(lost)
         self.details["datagrams"], self.details["lost_datagrams"] = self.datagrams, self.lost
@@ -638,10 +641,9 @@ class Iperf3Runner(WorkloadRunner):
         iv = parse_iperf3_line(line)
         if iv is None or iv.summary or (w.parallel > 1) != (iv.stream == "SUM"):
             return
-        if iv.datagrams is not None and w.length:
-            self._add_bytes(iv.datagrams * w.length)
-        else:
-            self._add_bytes(iv.bytes)
+        if w.protocol == "udp":
+            return  # counted on the server side, see _server_line
+        self._add_bytes(iv.bytes)
 
     def _start_server(self) -> None:
         self._listening.clear()

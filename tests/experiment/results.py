@@ -194,6 +194,9 @@ def render_summary(result: RunResult) -> str:
     for r in rows:
         lines.append("  " + "  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip())
     for w in result.workloads:
+        sent, lost = w.details.get("datagrams"), w.details.get("lost_datagrams")
+        if sent:
+            lines.append(f"  {w.id}: lost {lost or 0} of {sent} datagrams ({100 * (lost or 0) / sent:.1f}%)")
         if w.error:
             lines.append(f"  {w.id}: {w.error}")
     if result.senders:

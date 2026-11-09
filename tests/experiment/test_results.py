@@ -97,6 +97,11 @@ class Tests(unittest.TestCase):
         self.assertTrue(R.render_summary(run([wl()])).endswith("PASS"))
         self.assertIn("INTERRUPTED", R.render_summary(run([wl()], True)))
 
+    def test_summary_udp_loss(self):
+        be = wl(role="background", id="be")
+        be.details = {"datagrams": 1653865, "lost_datagrams": 933996}
+        self.assertIn("be: lost 933996 of 1653865 datagrams (56.5%)", R.render_summary(run([wl(), be])))
+
 
 if __name__ == "__main__":
     unittest.main()

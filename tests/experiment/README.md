@@ -138,6 +138,8 @@ Each run writes `tests/experiment/logs/<YYYYMMDD-HHMMSS>-<name>/`:
   The Prometheus values include `priority_drops` (`busy_forwarder` or `egress_down`) and the drops at
   a downed egress interface (BFD down), for priority traffic (`priority_drops_egress_down`) and for
   all traffic (`drops_egress_down`).
+  Bytes and goodput are what the receiver got: for UDP iperf3 that excludes the lost datagrams, whose
+  count is in `details` and in the printed summary.
 - `wg-<endpoint>.log`: wireguard-go log of each endpoint.
 - `<workload>.*.log`: rsync, iperf3 client/server and ping logs.
 

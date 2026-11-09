@@ -264,6 +264,32 @@ class PingTest(RunnerCase):
         self.assertIn('le="+Inf"', text)
 
 
+class Iperf3AccountingTest(RunnerCase):
+    """bytes (and so goodput) of an iperf3 workload are what the receiver got. With UDP the
+    client's numbers are the offered load: on SCIERA, be-load reported 9.98 Mbps while 56% of
+    its datagrams were lost."""
+
+    def ip(self, protocol):
+        return Iperf3(**common("iperf3", "ip1", "background"), protocol=protocol,
+                      bandwidth="10mbps" if protocol == "udp" else None,
+                      bandwidth_bps=10_000_000 if protocol == "udp" else None,
+                      length=900 if protocol == "udp" else None, duration=None, parallel=1,
+                      server_port=5393)
+
+    def test_udp_counts_received_datagrams(self):
+        r = self.make(self.ip("udp"))
+        r._client_line("[  5]   0.00-1.00   sec  1.19 MBytes  10.0 Mbits/sec  1389  ")
+        self.assertEqual(r.bytes, 0)
+        r._server_line("[  5]   0.00-1.00   sec   952 KBytes  7.80 Mbits/sec  0.496 ms  312/1395 (22%)  ")
+        self.assertEqual(r.bytes, (1395 - 312) * 900)
+        self.assertEqual((r.details["datagrams"], r.details["lost_datagrams"]), (1395, 312))
+
+    def test_tcp_counts_client_bytes(self):
+        r = self.make(self.ip("tcp"))
+        r._client_line(IPERF_TCP_CLIENT)
+        self.assertEqual(r.bytes, wl.parse_iperf3_line(IPERF_TCP_CLIENT).bytes)
+
+
 @unittest.skipUnless(have("iperf3"), "iperf3 missing")
 class Iperf3Test(RunnerCase):
     def ip(self, **kw):

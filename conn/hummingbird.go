@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -214,6 +215,130 @@ func (q sequenceQuerier) Query(ctx context.Context, dst addr.IA) ([]snet.Path, e
 	}
 	return nil, fmt.Errorf("none of the %d paths from %s to %s matches the sequence %q",
 		len(paths), q.local, dst, q.sequence.String())
+}
+
+const (
+	// marketplacePathRefreshAge is how old the cached paths to a marketplace get before a
+	// purchase that uses them also refreshes them, in the background.
+	marketplacePathRefreshAge = 30 * time.Second
+	// marketplacePathMinLifetime is how long a cached path must still be valid to be used:
+	// enough for a purchase to complete on it.
+	marketplacePathMinLifetime = 10 * time.Second
+	// marketplacePathRefreshTimeout bounds a background refresh.
+	marketplacePathRefreshTimeout = 30 * time.Second
+)
+
+// cachingQuerier keeps the last paths its querier returned for each destination. While
+// some of them stay valid, Query returns those at once and, once they are older than
+// refreshAge, refreshes them in the background; a refresh that fails or finds nothing keeps
+// the old paths. Query waits for the querier only when no cached path is usable.
+//
+// The SCION daemon refetches the segments to a destination every few minutes, and a
+// refetch can take seconds (on SCIERA, 2-3 s). Without the cache, the purchases that came
+// first after a refetch was due waited for it.
+type cachingQuerier struct {
+	ctx        context.Context // bounds the background refreshes
+	q          snet.PathQuerier
+	refreshAge time.Duration
+	minLife    time.Duration
+	now        func() time.Time
+	log        Logger // optional, reports failed background refreshes
+
+	mu      sync.Mutex
+	entries map[addr.IA]*cachedPaths
+}
+
+type cachedPaths struct {
+	paths      []snet.Path
+	fetched    time.Time
+	refreshing bool
+}
+
+func newCachingQuerier(ctx context.Context, q snet.PathQuerier, log Logger) *cachingQuerier {
+	return &cachingQuerier{
+		ctx:        ctx,
+		q:          q,
+		refreshAge: marketplacePathRefreshAge,
+		minLife:    marketplacePathMinLifetime,
+		now:        time.Now,
+		log:        log,
+		entries:    make(map[addr.IA]*cachedPaths),
+	}
+}
+
+func (c *cachingQuerier) Query(ctx context.Context, dst addr.IA) ([]snet.Path, error) {
+	c.mu.Lock()
+	if e := c.entries[dst]; e != nil {
+		now := c.now()
+		if valid := validPaths(e.paths, now.Add(c.minLife)); len(valid) > 0 {
+			if !e.refreshing && now.Sub(e.fetched) >= c.refreshAge {
+				e.refreshing = true
+				go c.refresh(dst)
+			}
+			c.mu.Unlock()
+			return valid, nil
+		}
+	}
+	c.mu.Unlock()
+
+	paths, err := c.q.Query(ctx, dst)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.storeLocked(dst, paths)
+	c.mu.Unlock()
+	return paths, nil
+}
+
+func (c *cachingQuerier) refresh(dst addr.IA) {
+	ctx, cancel := context.WithTimeout(c.ctx, marketplacePathRefreshTimeout)
+	defer cancel()
+	paths, err := c.q.Query(ctx, dst)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.entries[dst]; e != nil {
+		e.refreshing = false
+	}
+	if err == nil && len(paths) == 0 {
+		err = errors.New("no paths")
+	}
+	if err != nil {
+		if c.log != nil {
+			c.log.Verbosef("Refreshing the paths to the marketplace in %s failed, "+
+				"keeping the cached ones: %v", dst, err)
+		}
+		return
+	}
+	c.storeLocked(dst, paths)
+}
+
+// storeLocked caches non-empty paths for dst. c.mu must be held.
+func (c *cachingQuerier) storeLocked(dst addr.IA, paths []snet.Path) {
+	if len(paths) == 0 {
+		return
+	}
+	c.entries[dst] = &cachedPaths{paths: paths, fetched: c.now()}
+}
+
+// forget drops every cached path, so that the next Query waits for fresh ones.
+func (c *cachingQuerier) forget() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[addr.IA]*cachedPaths)
+}
+
+// validPaths returns the paths still valid at t. A path without a known expiry counts as
+// valid.
+func validPaths(paths []snet.Path, t time.Time) []snet.Path {
+	var valid []snet.Path
+	for _, p := range paths {
+		if md := p.Metadata(); md == nil || md.Expiry.IsZero() || md.Expiry.After(t) {
+			valid = append(valid, p)
+		}
+	}
+	return valid
 }
 
 // renewalSchedule spreads the handover of a reservation expiring at expiry over

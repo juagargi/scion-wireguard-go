@@ -114,6 +114,9 @@ type PathManager struct {
 	// Hummingbird settings
 	humm HummingbirdConfig
 	topo snet.Topology
+	// marketPaths caches the paths to the marketplaces; see marketplacePaths.
+	marketOnce  sync.Once
+	marketPaths *cachingQuerier
 
 	metrics Metrics
 }
@@ -804,6 +807,21 @@ func (pm *PathManager) buyReservationWithRetry(
 	return nil, nil, lastErr
 }
 
+// marketplacePaths returns the querier the purchases look up the path to their marketplace
+// with: the daemon's, behind a cache that answers at once while its paths are valid and
+// refreshes them in the background.
+func (pm *PathManager) marketplacePaths() *cachingQuerier {
+	pm.marketOnce.Do(func() {
+		ctx := pm.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		pm.marketPaths = newCachingQuerier(ctx,
+			pm.humm.marketplaceQuerier(pm.d, pm.localIA, pm.log), pm.log)
+	})
+	return pm.marketPaths
+}
+
 // oneShotReservation buys a reservation from a marketplace. A variable so tests can replace it.
 var oneShotReservation = marketplace.OneShotReservation
 
@@ -842,7 +860,7 @@ func (pm *PathManager) buyReservation(
 		ctx,
 		path,
 		pm.humm.JWT,
-		pm.humm.marketplaceQuerier(pm.d, pm.localIA, pm.log),
+		pm.marketplacePaths(),
 		pm.topo,
 		pm.humm.Insecure,
 		marketplace.ReservationRequest{
@@ -865,6 +883,8 @@ func (pm *PathManager) buyReservation(
 	pm.metrics.ObserveReservationSetup(time.Since(timerStart), err)
 
 	if err != nil {
+		// The path may be what failed: let the next attempt look it up afresh.
+		pm.marketplacePaths().forget()
 		return nil, nil, fmt.Errorf("marketplace reservation: %w", err)
 	}
 	return rsv, path.UnderlayNextHop(), nil

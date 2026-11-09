@@ -187,20 +187,25 @@ chmod "$2" "$1"
 mv -f -- "$1" "$3"
 """
 
-# $1 pidfile, $2 logfile, then argv. stdin: shell assignments (env and env_from_files).
+# Seconds a started daemon has to record its pid. Generous: SCIERA's ufes stalls on its disk
+# for several seconds at a time, on every file system (6.7 s once broke a run).
+START_PID_WAIT = 30
+
+# $1 pidfile, $2 logfile, $3 seconds to wait for the pid, then argv.
+# stdin: shell assignments (env and env_from_files).
 # The pid file is written by the shell that then execs argv, so it holds argv's own pid.
 _START_SCRIPT = r"""set -e
 umask 022
-pidfile=$1; logfile=$2; shift 2
+pidfile=$1; logfile=$2; wait=$3; shift 3
 set -a
 eval "$(cat)"
 set +a
 mkdir -p -- "$(dirname -- "$pidfile")" "$(dirname -- "$logfile")"
 rm -f -- "$pidfile"
 setsid bash -c 'echo "$$" > "$1"; shift; exec "$@"' bash "$pidfile" "$@" >"$logfile" 2>&1 </dev/null &
-i=0
-while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i+1)); done
-[ -s "$pidfile" ] || { echo "daemon did not record its pid in $pidfile" >&2; exit 1; }
+end=$((SECONDS + wait))
+while [ ! -s "$pidfile" ] && [ "$SECONDS" -lt "$end" ]; do sleep 0.05; done
+[ -s "$pidfile" ] || { echo "daemon did not record its pid in $pidfile within ${wait}s" >&2; exit 1; }
 cat "$pidfile"
 """
 
@@ -306,7 +311,8 @@ class _ScriptHost:
     def start_daemon(self, argv, *, env, log_path, pid_path, root=False, env_from_files=None):
         argv = [str(a) for a in argv]
         stdin = start_script_input(env, env_from_files)
-        result = self._script(_START_SCRIPT, pid_path, log_path, *argv, input=stdin, root=root,
+        result = self._script(_START_SCRIPT, pid_path, log_path, str(START_PID_WAIT), *argv,
+                              input=stdin, root=root,
                               check=False)
         if result.returncode != 0:
             # The command line is reported without the environment, which may hold secrets.

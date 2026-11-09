@@ -27,6 +27,8 @@ PAYLOAD_EFFICIENCY = 0.8
 RSYNC_BASE_PORT = 8730          # rsync daemon port = RSYNC_BASE_PORT + index (index unique per run)
 POLL_INTERVAL = 0.05             # seconds between checks of a running process, for it and for stop
 RESTART_BACKOFF = 1.0           # seconds between iperf3 restarts
+SERVICE_START_TIMEOUT = 60.0    # seconds for an rsync daemon or iperf3 server to come up; generous,
+                                # since SCIERA's ufes stalls on its disk for seconds at a time
 RTT_BUCKETS = (0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
                0.25, 0.5, 1.0, 2.5, 5.0)
 
@@ -492,7 +494,7 @@ class FileCopyRunner(WorkloadRunner):
             ["rsync", "--daemon", "--no-detach", f"--config={self.conf_path}"],
             env=None, log_path=f"{self.receiver_dir}/rsyncd.stdout", pid_path=self.pid_path)
         self._daemon_started = True
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + SERVICE_START_TIMEOUT
         delay = 0.05
         while True:
             probe = self.receiver.run(["rsync", f"rsync://{self.dst_ip}:{self.port}/"],
@@ -648,13 +650,14 @@ class Iperf3Runner(WorkloadRunner):
     def _start_server(self) -> None:
         self._listening.clear()
         self._server = self._spawn(self.receiver, self._server_argv(), "server", self._server_line)
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + SERVICE_START_TIMEOUT
         while not self._listening.wait(0.1):
             if self._server.poll() is not None:
                 raise RuntimeError(f"iperf3 server exited with status {self._server.returncode} "
                                    f"(see {self.w.id}.server.log)")
             if time.monotonic() > deadline or self._stop.is_set():
-                raise RuntimeError("iperf3 server did not report listening within 10s")
+                raise RuntimeError(f"iperf3 server did not report listening within "
+                                   f"{SERVICE_START_TIMEOUT:.0f}s")
 
     def _stop_server(self) -> None:
         if self._server is not None:

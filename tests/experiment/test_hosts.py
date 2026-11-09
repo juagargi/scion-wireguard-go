@@ -1,6 +1,7 @@
 """Tests for hosts.py: LocalHost for real, SSHHost against a fake ssh_orchestration, DockerHost's argv."""
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -128,6 +129,29 @@ class TestLocalHost(LocalBase):
         self.assertFalse(self.host.daemon_alive(pid_path))
         self.assertFalse(Path(pid_path).exists())
         self.assertFalse(self.host.stop_daemon(pid_path))
+
+    def test_start_waits_for_a_slow_pid(self):
+        """A host whose disk stalls for seconds (SCIERA's ufes) records the pid late: the
+        start waits up to START_PID_WAIT for it."""
+        slow = self.path("slow-bin")
+        os.makedirs(slow)
+        wrapper = Path(slow, "setsid")
+        wrapper.write_text(f"#!/bin/bash\nsleep 1.5\nexec {shutil.which('setsid')} \"$@\"\n")
+        wrapper.chmod(0o755)
+        env = {"PATH": f"{slow}:{os.environ['PATH']}"}
+        pid_path, log = self.path("s.pid"), self.path("s.log")
+
+        with mock.patch.object(hosts, "START_PID_WAIT", 1):
+            with self.assertRaisesRegex(hosts.HostError, "within 1s"):
+                self.host.start_daemon(["sleep", "5"], env=env, log_path=log, pid_path=pid_path)
+        wait_until(lambda: Path(pid_path).exists())  # the late daemon: stop it
+        self.host.stop_daemon(pid_path)
+
+        with mock.patch.object(hosts, "START_PID_WAIT", 5):
+            pid = self.host.start_daemon(["sleep", "30"], env=env, log_path=log, pid_path=pid_path)
+        self.addCleanup(self.host.stop_daemon, pid_path)
+        self.assertEqual(int(Path(pid_path).read_text()), pid)
+        self.assertTrue(self.host.daemon_alive(pid_path))
 
     def test_stop_ignores_garbage_pidfile(self):
         Path(self.path("p.pid")).write_text("not a pid\n")

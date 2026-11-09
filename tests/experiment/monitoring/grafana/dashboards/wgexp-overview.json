@@ -696,7 +696,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(wireguard_reservation_setup_duration_seconds_sum{tunnel=~\"$tunnel\",result=\"ok\"} - (wireguard_reservation_setup_duration_seconds_sum{tunnel=~\"$tunnel\",result=\"ok\"} offset $__interval or wireguard_reservation_setup_duration_seconds_sum{tunnel=~\"$tunnel\",result=\"ok\"} * 0)) / ((wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\",result=\"ok\"} - (wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\",result=\"ok\"} offset $__interval or wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\",result=\"ok\"} * 0)) > 0)",
+          "expr": "(wireguard_reservation_setup_duration_seconds_sum{tunnel=~\"$tunnel\",result=\"ok\"} - last_over_time(wireguard_reservation_setup_duration_seconds_sum{tunnel=~\"$tunnel\",result=\"ok\"}[1m] offset $__interval)) / ((wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\",result=\"ok\"} - last_over_time(wireguard_reservation_setup_duration_seconds_count{tunnel=~\"$tunnel\",result=\"ok\"}[1m] offset $__interval)) > 0)",
           "legendFormat": "{{tunnel}} {{endpoint}} roundtrip",
           "range": true,
           "refId": "A"

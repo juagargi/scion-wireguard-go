@@ -135,6 +135,9 @@ Each run writes `tests/experiment/logs/<YYYYMMDD-HHMMSS>-<name>/`:
   outcome (`state` passed/failed/stopped/timeout, bytes, goodput, restarts, details such as the
   sha256 of both copies), per-sender reservation counts (bought, failed, handovers, marketplace
   addresses), Prometheus summary values, and `grafana_url`, which opens the dashboard on the run window.
+  The Prometheus values include `priority_drops` (`busy_forwarder` or `egress_down`) and the drops at
+  a downed egress interface (BFD down), for priority traffic (`priority_drops_egress_down`) and for
+  all traffic (`drops_egress_down`).
 - `wg-<endpoint>.log`: wireguard-go log of each endpoint.
 - `<workload>.*.log`: rsync, iperf3 client/server and ping logs.
 

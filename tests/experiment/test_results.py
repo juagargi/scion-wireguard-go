@@ -78,6 +78,8 @@ class Tests(unittest.TestCase):
         srv.shutdown()
         self.assertEqual(out["demoted_freshness"], 7.0)
         self.assertIsNone(out["priority_drops"])
+        self.assertIsNone(out["priority_drops_egress_down"])
+        self.assertIn("drops_egress_down", out)
         self.assertTrue(out["demoted_expired"].startswith("error"))
         dead = R.query_prometheus("http://127.0.0.1:1", 100, 160, timeout=0.5)
         self.assertTrue(all(str(v).startswith("error") for k, v in dead.items() if k != "window_s"))

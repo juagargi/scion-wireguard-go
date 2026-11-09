@@ -914,7 +914,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Total number of priority packets dropped per minute because a border-router forwarder queue was busy.",
+      "description": "Total number of priority packets dropped per minute because a border-router forwarder queue was busy (busy_forwarder) or the egress interface was down (egress_down).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -964,7 +964,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(increase(router_dropped_priority_pkts_total{reason=\"busy_forwarder\"}[1m])) or on() vector(0)",
+          "expr": "sum(increase(router_dropped_priority_pkts_total{reason=~\"busy_forwarder|egress_down\"}[1m])) or on() vector(0)",
           "legendFormat": "priority drops",
           "range": true,
           "refId": "A"
@@ -978,7 +978,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Priority packets dropped per minute because a border-router forwarder queue was busy, split by border router and interface.",
+      "description": "Priority packets dropped per minute because a border-router forwarder queue was busy (busy_forwarder) or the egress interface was down (egress_down), split by border router, interface, and reason.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1027,8 +1027,8 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (as, br, interface) (increase(router_dropped_priority_pkts_total{reason=\"busy_forwarder\"}[1m]))",
-          "legendFormat": "{{as}} {{br}} if {{interface}}",
+          "expr": "sum by (as, br, interface, reason) (increase(router_dropped_priority_pkts_total{reason=~\"busy_forwarder|egress_down\"}[1m]))",
+          "legendFormat": "{{as}} {{br}} if {{interface}} {{reason}}",
           "range": true,
           "refId": "A"
         }

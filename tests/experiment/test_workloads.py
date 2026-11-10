@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -6,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,6 +108,9 @@ class FakeHost:
     """A Host on this machine, built on subprocess."""
     name, kind = "local", "docker"
 
+    def __init__(self):
+        self._daemons = {}
+
     def run(self, argv, *, check=True, timeout=None, env=None, input=None, root=False):
         p = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, input=input)
         if check and p.returncode != 0:
@@ -121,6 +126,7 @@ class FakeHost:
             p = subprocess.Popen(list(argv), stdout=log, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL, start_new_session=True)
         Path(pid_path).write_text(str(p.pid))
+        self._daemons[p.pid] = p
         return p.pid
 
     def stop_daemon(self, pid_path, *, timeout=5.0, root=False):
@@ -132,7 +138,10 @@ class FakeHost:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             return False
-        time.sleep(0.3)
+        try:
+            self._daemons.pop(pid).wait(timeout)
+        except (KeyError, subprocess.TimeoutExpired):
+            pass
         Path(pid_path).unlink(missing_ok=True)
         return True
 
@@ -149,6 +158,15 @@ def endpoints():
 def common(kind, wid, role, **kw):
     return dict(id=wid, kind=kind, from_="A", to="B", role=role, start_delay=0.0,
                 timeout=kw.pop("timeout", None), tunnel=endpoints())
+
+
+def wait_until(cond, timeout=30.0, what="the condition"):
+    """Poll cond every few milliseconds until it holds, so that a test takes as long as the code does."""
+    deadline = time.monotonic() + timeout
+    while not cond():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        time.sleep(0.005)
 
 
 def have(*tools):
@@ -198,8 +216,8 @@ class FileCopyTest(RunnerCase):
         self.assertFalse(os.path.exists(f"{self.tmp}/r/fc1"))
 
     def test_bwlimit_and_timeout(self):
-        # 1 Mbps limit on ~2.5 MB: far longer than the 2 s timeout
-        r = self.make(self.fc(bwlimit="1mbps", bwlimit_bps=1_000_000, timeout=2.0, repeat=1), index=22)
+        # 1 Mbps limit on ~2.5 MB: far longer than the 0.5 s timeout
+        r = self.make(self.fc(bwlimit="1mbps", bwlimit_bps=1_000_000, timeout=0.5, repeat=1), index=22)
         self.assertEqual(r.bwlimit_bps, 1_000_000)
         r.prepare()
         r.start()
@@ -216,7 +234,7 @@ class FileCopyTest(RunnerCase):
         r = self.make(self.fc(role="background", repeat=0, size="1MiB", size_bytes=1 << 20), index=25)
         r.prepare()
         r.start()
-        time.sleep(1.5)
+        wait_until(lambda: r.result().iterations >= 1 or r.poll() != "running", what="a first iteration")
         self.assertEqual(r.poll(), "running")
         r.stop()
         r.stop()
@@ -226,11 +244,15 @@ class FileCopyTest(RunnerCase):
 
 @unittest.skipUnless(have("ping"), "ping missing")
 class PingTest(RunnerCase):
+    def pings_answered(self):
+        m = re.search(r"wgexp_ping_rtt_seconds_count\{[^}]*\} (\d+)", self.metrics.registry.render())
+        return int(m.group(1)) if m else 0
+
     def test_ping_loopback(self):
         r = self.make(Ping(**common("ping", "p1", "background"), interval=0.2, payload_size=32))
         r.prepare()
         r.start()
-        time.sleep(2.2)
+        wait_until(lambda: self.pings_answered() >= 5, what="5 ping replies")
         r.stop()
         res = r.result()
         self.assertEqual(res.state, "passed", res.error)
@@ -242,11 +264,37 @@ class PingTest(RunnerCase):
         self.assertIn('le="+Inf"', text)
 
 
+class Iperf3AccountingTest(RunnerCase):
+    """bytes (and so goodput) of an iperf3 workload are what the receiver got. With UDP the
+    client's numbers are the offered load: on SCIERA, be-load reported 9.98 Mbps while 56% of
+    its datagrams were lost."""
+
+    def ip(self, protocol):
+        return Iperf3(**common("iperf3", "ip1", "background"), protocol=protocol,
+                      bandwidth="10mbps" if protocol == "udp" else None,
+                      bandwidth_bps=10_000_000 if protocol == "udp" else None,
+                      length=900 if protocol == "udp" else None, duration=None, parallel=1,
+                      server_port=5393)
+
+    def test_udp_counts_received_datagrams(self):
+        r = self.make(self.ip("udp"))
+        r._client_line("[  5]   0.00-1.00   sec  1.19 MBytes  10.0 Mbits/sec  1389  ")
+        self.assertEqual(r.bytes, 0)
+        r._server_line("[  5]   0.00-1.00   sec   952 KBytes  7.80 Mbits/sec  0.496 ms  312/1395 (22%)  ")
+        self.assertEqual(r.bytes, (1395 - 312) * 900)
+        self.assertEqual((r.details["datagrams"], r.details["lost_datagrams"]), (1395, 312))
+
+    def test_tcp_counts_client_bytes(self):
+        r = self.make(self.ip("tcp"))
+        r._client_line(IPERF_TCP_CLIENT)
+        self.assertEqual(r.bytes, wl.parse_iperf3_line(IPERF_TCP_CLIENT).bytes)
+
+
 @unittest.skipUnless(have("iperf3"), "iperf3 missing")
 class Iperf3Test(RunnerCase):
     def ip(self, **kw):
-        args = dict(protocol="udp", bandwidth="4mbps", bandwidth_bps=4_000_000, length=900,
-                    duration=3.0, parallel=1, server_port=5391)
+        args = dict(protocol="udp", bandwidth="16mbps", bandwidth_bps=16_000_000, length=900,
+                    duration=1.0, parallel=1, server_port=5391)
         args.update(kw)
         return Iperf3(**common("iperf3", "ip1", args.pop("role", "primary")), **args)
 
@@ -260,18 +308,19 @@ class Iperf3Test(RunnerCase):
         self.assertGreater(res.details["datagrams"], 1000)
         self.assertIn("wgexp_iperf3_datagrams_total{", self.metrics.registry.render())
 
+    @mock.patch.object(wl, "RESTART_BACKOFF", 0.05)
     def test_background_restart(self):
         r = self.make(self.ip(role="background", duration=None, server_port=5392))
         r.prepare()
         r.start()
-        time.sleep(1.5)
+        has = lambda flag: any(flag in p.args for p in list(r._procs))
+        wait_until(lambda: has("-s") and has("-c"), what="the server and the client to run")
         # kill the server: both sides must be restarted
         for p in list(r._procs):
             if "-s" in p.args:
                 p.kill()
-        time.sleep(wl.RESTART_BACKOFF + 3)
+        wait_until(lambda: r.restarts >= 1 and has("-s") and has("-c"), what="both sides to restart")
         self.assertEqual(r.poll(), "running")
-        self.assertGreaterEqual(r.restarts, 1)
         r.stop()
         self.assertEqual(r.poll(), "passed")
 

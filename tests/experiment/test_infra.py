@@ -107,18 +107,18 @@ class FakeOrchestration:
 class Pure(unittest.TestCase):
     def test_labels_cover_the_plan_table(self):
         exp = docker_experiment()
-        a, b, c, d = (exp.endpoint(n) for n in "ABCD")
+        a, b, c, d = (exp.endpoint(n) for n in ("QoS1", "QoS2", "BE1", "BE2"))
         self.assertEqual(infra.wireguard_labels(exp, a, "tester_x"), {
-            "experiment": "docker-tiny-1g", "tunnel": "ab", "endpoint": "A", "peer": "B",
+            "experiment": "docker-tiny-1g", "tunnel": "ab", "endpoint": "QoS1", "peer": "QoS2",
             "class": "hummingbird", "tunnel_class": "hummingbird", "isd_as": "1-ff00:0:111",
             "node": "tester_x"})
         lb = infra.wireguard_labels(exp, b, "n")
         self.assertEqual((lb["class"], lb["tunnel_class"], lb["peer"]),
-                         ("best_effort", "hummingbird", "A"))
+                         ("best_effort", "hummingbird", "QoS1"))
         lc = infra.wireguard_labels(exp, c, "n")
         self.assertEqual((lc["class"], lc["tunnel_class"], lc["tunnel"]),
                          ("best_effort", "best_effort", "cd"))
-        self.assertEqual(infra.wireguard_labels(exp, d, "n")["peer"], "C")
+        self.assertEqual(infra.wireguard_labels(exp, d, "n")["peer"], "BE1")
 
     def test_grafana_url_window(self):
         exp = docker_experiment()
@@ -194,7 +194,7 @@ class DockerTargets(unittest.TestCase):
         self.assertEqual([t["targets"][0] for t in wg],
                          ["172.20.0.3:28015", "172.20.0.4:28015",
                           "172.20.0.2:28016", "172.20.0.4:28016"])
-        self.assertEqual([t["labels"]["endpoint"] for t in wg], list("ABCD"))
+        self.assertEqual([t["labels"]["endpoint"] for t in wg], ["QoS1", "QoS2", "BE1", "BE2"])
         self.assertEqual(wg[1]["labels"]["node"], "tester_1-ff00_0_112")
         self.assertEqual(wg[0]["labels"]["class"], "hummingbird")
         self.assertEqual(json.loads(docs["targets/runner.json"]),
@@ -224,7 +224,7 @@ class DockerTargets(unittest.TestCase):
         self.assertEqual(i.binary_paths(), {k: "/share/bin/wireguard-go" for k in
                                             ("1-ff00:0:110", "1-ff00:0:111", "1-ff00:0:112")})
         self.assertEqual(i.jwt_paths(), {"1-ff00:0:111": infra.DOCKER_JWT})
-        self.assertEqual(i.sciond_address(i.experiment.endpoint("A")), "[fd00::1]:30255")
+        self.assertEqual(i.sciond_address(i.experiment.endpoint("QoS1")), "[fd00::1]:30255")
         self.assertEqual(i.hosts()["1-ff00:0:111"].commands[-1][0], ["printenv", "SCION_DAEMON"])
 
 
@@ -245,6 +245,8 @@ class DockerPreflight(unittest.TestCase):
         def answer(argv, root):
             if argv[:2] == ["bash", "-c"]:
                 return 0, ""
+            if argv == ["ping", "-V"]:
+                return 0, "ping from iputils 20211215\n"
             return 0, "10.0.0.0/8 dev eth9\n" if "route" in argv and False else ""
         i, hosts = self.infra_with(answer)
         self.assertEqual(i.preflight(), [])
@@ -255,6 +257,19 @@ class DockerPreflight(unittest.TestCase):
         self.assertEqual(len(routes), 4)
         self.assertIn(["ip", "-o", "route", "show", "to", "root", "10.78.0.0/24"], routes)
         self.assertFalse(any(root for c, root in hosts["1-ff00:0:112"].commands))
+
+    def test_ping_sender_needs_iputils(self):
+        def answer(argv, root):
+            if argv == ["ping", "-V"]:
+                return 0, "ping (GNU inetutils) 2.5\n"
+            return 0, ""
+        i, _ = self.infra_with(answer)
+        i.dry_run = True
+        problems = i.preflight()
+        # ping-ab is sent from A (111) and ping-cd from C (110); 112 sends no ping
+        self.assertEqual(sorted(p.split(":")[0] for p in problems if "iputils" in p),
+                         ["1-ff00", "1-ff00"])
+        self.assertFalse(any(p.startswith("1-ff00:0:112") and "iputils" in p for p in problems))
 
     def test_problems_are_collected(self):
         def answer(argv, root):
@@ -623,6 +638,17 @@ class DockerFlow(unittest.TestCase):
         self.assertEqual((seen["cfg"].username, seen["cfg"].location_override), ("alice", False))
 
 
+class RequiredTools(unittest.TestCase):
+    """Each host is asked only for the tools of the workloads it is an end of."""
+
+    def test_sciera_hosts(self):
+        exp = sciera_experiment()
+        self.assertEqual(infra.required_tools(exp, "rnp"), ("ip", "ping", "sha256sum", "rsync", "dd"))
+        self.assertEqual(infra.required_tools(exp, "ufes"), ("ip", "ping", "sha256sum", "iperf3"))
+        self.assertEqual(infra.required_tools(exp, "ufms"),
+                         ("ip", "ping", "sha256sum", "rsync", "dd", "iperf3"))
+
+
 @needs_scion
 class SSHFlow(unittest.TestCase):
     """(c) The SSH inventory, sources, documents and relay specs for experiment-sciera.json.
@@ -639,8 +665,22 @@ class SSHFlow(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def make(self, dry_run=False, **kwargs):
+        # Never a real SSHHost: a test must not reach the SCIERA hosts. Commands go to FakeHosts
+        # (kept in self.hosts) unless the test passes its own factory.
+        self.hosts = {}
+
+        def fake(key):
+            self.hosts[key] = FakeHost(key, self.answer)
+            return self.hosts[key]
+        kwargs.setdefault("host_factory", fake)
         return infra.SSHInfra(sciera_experiment(), Path(SCION_DIR), dry_run, hb=self.hb,
                               gen_dir=Path(self.tmp.name), **kwargs)
+
+    @staticmethod
+    def answer(argv, root):
+        if argv[:1] == ["getcap"]:
+            return 0, f"{argv[1]} cap_net_admin=ep\n"
+        return 0, ""
 
     def test_inventory(self):
         i = self.make()
@@ -672,7 +712,7 @@ class SSHFlow(unittest.TestCase):
         ])
         self.assertEqual(sources[0].labels["node"], "rnp")
         self.assertEqual(sources[3].labels, {
-            "experiment": "sciera-1g", "tunnel": "cd", "endpoint": "D", "peer": "C",
+            "experiment": sciera_experiment().name, "tunnel": "cd", "endpoint": "BE2", "peer": "BE1",
             "class": "best_effort", "tunnel_class": "best_effort", "isd_as": "71-2:0:5c",
             "node": "ufms"})
         self.assertEqual(sources[5].labels, {"as": "71_1916", "br": "br-2"})
@@ -685,7 +725,7 @@ class SSHFlow(unittest.TestCase):
                          [["127.0.0.1:19190"], ["127.0.0.1:28015"], ["127.0.0.1:19192"],
                           ["127.0.0.1:28016"]])
         self.assertEqual(docs["targets/runner.json"],
-                         [{"targets": ["127.0.0.1:19194"], "labels": {"experiment": "sciera-1g"}}])
+                         [{"targets": ["127.0.0.1:19194"], "labels": {"experiment": sciera_experiment().name}}])
         self.assertEqual([t["targets"] for t in docs["targets/border_routers.json"]],
                          [["127.0.0.1:19195"], ["127.0.0.1:19196"], ["127.0.0.1:38401"]])
 
@@ -706,7 +746,7 @@ class SSHFlow(unittest.TestCase):
         self.assertEqual(i.binary_paths(), {k: "/var/tmp/wgexp/setup/wireguard-go"
                                             for k in ("rnp", "ufes", "ufms")})
         self.assertEqual(i.jwt_paths(), {"rnp": "/var/tmp/wgexp/setup/marketplace.jwt"})
-        self.assertEqual(i.sciond_address(i.experiment.endpoint("C")), "127.0.0.1:30255")
+        self.assertEqual(i.sciond_address(i.experiment.endpoint("BE1")), "127.0.0.1:30255")
         self.assertEqual(i.run_dir("ufes"), "/var/tmp/wgexp")
 
     def test_monitoring_steps_use_our_stack(self):
@@ -827,6 +867,60 @@ class SSHFlow(unittest.TestCase):
         self.assertEqual(jwt[0][5], 0o600)  # the controller's copy is private
         self.assertEqual(paths, {"rnp": "/var/tmp/wgexp/setup/marketplace.jwt"})
 
+    def test_binary_gets_net_admin_and_is_checked(self):
+        ss = self.hb.ssh_setup
+        binary = Path(self.tmp.name) / "wg"
+        binary.write_bytes(b"x")
+        capped = set()
+
+        def factory(key):
+            def answer(argv, root):  # each host has its own copy of the binary
+                if argv[:1] == ["getcap"]:
+                    return 0, f"{argv[1]} cap_net_admin=ep\n" if key in capped else ""
+                if argv[:1] == ["setcap"]:
+                    capped.add(key)
+                return 0, ""
+            self.hosts[key] = FakeHost(key, answer)
+            return self.hosts[key]
+        i = self.make(host_factory=factory)
+        with mock.patch.object(ss, "copy_if_changed", lambda *a: True), mock.patch("builtins.print"):
+            i.install_binary(binary)
+        self.assertEqual(capped, {"rnp", "ufes", "ufms"})
+        cmds = self.hosts["ufms"].commands
+        self.assertIn((["setcap", "cap_net_admin+ep", "/var/tmp/wgexp/setup/wireguard-go"], True), cmds)
+        check = [c for c, root in cmds if c[:2] == ["bash", "-c"] and "WG_UAPI_DIR" in c[2]]
+        self.assertEqual(check[0][4:], ["/var/tmp/wgexp/setup/wireguard-go", "wgx-capcheck"])
+        self.assertFalse([root for c, root in cmds if c[:2] == ["bash", "-c"]][0])  # as the user
+        self.assertIn((["ip", "link", "del", "dev", "wgx-capcheck"], True), cmds)
+
+    def test_failing_capability_check_fails_setup(self):
+        def answer(argv, root):
+            if argv[:1] == ["getcap"]:
+                return 0, f"{argv[1]} cap_net_admin=ep\n"
+            if argv[:2] == ["bash", "-c"] and "WG_UAPI_DIR" in argv[2]:
+                return 1, "Failed to create TUN device: operation not permitted"
+            return 0, ""
+        self.answer = answer
+        binary = Path(self.tmp.name) / "wg"
+        binary.write_bytes(b"x")
+        i = self.make()
+        with mock.patch.object(self.hb.ssh_setup, "copy_if_changed", lambda *a: False), \
+                mock.patch("builtins.print"):
+            with self.assertRaises(infra.InfraError) as cm:
+                i.install_binary(binary)
+        self.assertIn("cannot create a TUN device", str(cm.exception))
+
+    def test_dry_run_does_not_setcap(self):
+        self.answer = lambda argv, root: (0, "")
+        binary = Path(self.tmp.name) / "wg"
+        binary.write_bytes(b"x")
+        i = self.make(dry_run=True)
+        with mock.patch.object(self.hb.ssh_setup, "copy_if_changed", lambda *a: True), \
+                mock.patch("builtins.print"):
+            i.install_binary(binary)
+        for host in self.hosts.values():
+            self.assertFalse([c for c, _ in host.commands if c[:1] == ["setcap"] or c[:2] == ["bash", "-c"]])
+
     def test_preflight_uses_remote_preflight_and_checks(self):
         remote, ss = self.hb.remote, self.hb.ssh_setup
         topo = json.dumps({"isd_as": "71-1916", "dispatched_ports": "31000-32767"})
@@ -834,6 +928,8 @@ class SSHFlow(unittest.TestCase):
         def answer(argv, root):
             if argv[:2] == ["bash", "-c"] and "df -Pk" in argv[2]:
                 return 0, "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 100 1 99999999 1% /\n"
+            if argv == ["ping", "-V"]:
+                return 0, "ping from iputils 20240117\n"
             return 0, ""
 
         hosts = {}
@@ -850,7 +946,7 @@ class SSHFlow(unittest.TestCase):
                 mock.patch("builtins.print"):
             self.assertEqual(i.preflight(), [])
         self.assertEqual(sorted(p[0] for p in pre), ["rnp", "ufes", "ufms"])
-        self.assertEqual(pre[0][2], ("ip", "rsync", "iperf3", "ping", "sha256sum", "nc"))
+        self.assertEqual(pre[0][2], ("ip", "ping", "sha256sum", "rsync", "dd", "nc"))  # rnp: A sends the copy
         for key, host in hosts.items():
             cmds = host.commands
             self.assertIn((["true"], True), cmds)  # sudo -n true

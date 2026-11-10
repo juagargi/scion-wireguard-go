@@ -266,9 +266,12 @@ EOF
 * Set one filter per AS; setting another one for the same AS replaces it, and
   `scion_path_filter=<ISD-AS>` alone removes it. `get=1` lists them all.
 * Filters are best set before the peer's `scion_endpoint`, so that no packet ever
-  leaves on another path. A filter set later takes effect right away: if it changes
-  the selected path, the current reservation is dropped and a new one is bought for
-  the new path.
+  leaves on another path and the first reservation is bought for an allowed one. In one
+  `set` operation, put `scion_path_filter` before `public_key`. A filter set later takes
+  effect right away: if it changes the selected path, the current reservation is dropped
+  and a new one is bought for the new path.
+* Reservations are only bought for an AS once a `scion_endpoint` in it was accepted. A
+  rejected one, for example while the daemon has no path yet, buys nothing.
 * When no path matches, there is no fallback: a `scion_endpoint` in that AS is
   rejected, and packets to it are dropped.
 * A reverse reservation advertised by the peer travels on the path the peer chose,

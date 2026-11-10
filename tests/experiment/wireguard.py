@@ -10,8 +10,12 @@ Layout on the host, for one instance of endpoint E, run <id>, run dir <run_dir>:
                                             SSH: <run_dir>/setup/wireguard-go); the integrator installs it
     <run_dir>/runs/<id>/wg-<E>.log          stdout+stderr of wireguard-go (LOG_LEVEL=verbose)
     <run_dir>/runs/<id>/wg-<E>.pid          pid, as recorded by the launcher
-    /var/run/wireguard/<interface>.sock     UAPI socket (created by wireguard-go)
+    <run_dir>/uapi/<interface>.sock         UAPI socket (created by wireguard-go, see WG_UAPI_DIR)
     jwt_path                                the marketplace JWT, mode 600 (never in argv, see start())
+
+wireguard-go runs as the host's user, not root: on SSH hosts the binary carries cap_net_admin (a
+file capability set by setup), and in Docker the tester user is root anyway. Only the `ip` commands
+on the tunnel device (address, MTU, up, delete) run as root, through Host.run(root=True).
 
 Where the integrator has to be careful:
 
@@ -19,7 +23,7 @@ Where the integrator has to be careful:
   Docker (SCION_DAEMON of the tester) and SSH (the deployment host's `sciond`).
 * The peer's SCION host for `scion_endpoint` comes from `configure(peer_address=...)`; with
   `bring_up_tunnel` it is the peer's `scion_host` (its Endpoint.host, else its host.address()).
-* Instances of endpoints that share a container (B and D in the Docker example) are told apart by
+* Instances of endpoints that share a container (QoS2 and BE2 in the Docker example) are told apart by
   interface name, listen port and API port, all from the config.
 """
 
@@ -98,7 +102,10 @@ def generate_keypair() -> tuple[str, str]:
 # UAPI
 # ---------------------------------------------------------------------------------------------
 
-UAPI_DIR = "/var/run/wireguard"
+def uapi_dir(run_dir: str) -> str:
+    """Where the instances of a run dir put their UAPI sockets (WG_UAPI_DIR): a directory the
+    user owns, since an unprivileged wireguard-go cannot write to /var/run/wireguard."""
+    return f"{run_dir.rstrip('/')}/uapi"
 
 # The tester image carries neither socat nor nc (nor sh), but ships perl, whose IO::Socket::UNIX is
 # a core module. The program is passed as `perl -e`, so there is no helper file to leave behind.
@@ -134,21 +141,22 @@ def redact(text: str) -> str:
 
 def peer_transaction(private_key: str, listen_port: int, peer_public_key: str, peer_tunnel_ip: str,
                      peer_isd_as: str, peer_host: str, peer_listen_port: int,
-                     keepalive: int) -> str:
-    """The UAPI `set` transaction that configures the device and its single peer."""
+                     keepalive: int, path_filter: str | None = None) -> str:
+    """The UAPI `set` transaction that configures the device and its single peer.
+
+    The path filter, if any, comes before the peer: wireguard-go buys a reservation as soon as it
+    has the peer's scion_endpoint, and must do so for a path the filter allows.
+    """
     return "\n".join([
         "set=1",
         f"private_key={private_key}",
         f"listen_port={listen_port}",
+        *([f"scion_path_filter={peer_isd_as} {path_filter}"] if path_filter else []),
         f"public_key={peer_public_key}",
         f"allowed_ip={peer_tunnel_ip}/32",
         f"scion_endpoint={peer_isd_as},[{peer_host}]:{peer_listen_port}",
         f"persistent_keepalive_interval={keepalive}",
         "", ""])
-
-
-def path_filter_request(peer_isd_as: str, sequence: str) -> str:
-    return f"set=1\nscion_path_filter={peer_isd_as} {sequence}\n\n"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -164,8 +172,18 @@ PURCHASE_FAILED = re.compile(r"Buying Hummingbird reservation for \S+ failed.*")
 OVERRIDE_PURCHASE = re.compile(
     r"Hummingbird: buying the reservation for \S+ from the marketplace at (\S+), set by "
     r"HUMMINGBIRD_MARKETPLACE_ADDRESS")
-PATH_FILTER = re.compile(r"Path filter for (\S+): (\d+) of (\d+) paths match .*")
 CANNOT_LISTEN = re.compile(r"^.*cannot listen on.*$", re.MULTILINE)
+# wireguard-go rejects scion_endpoint when its daemon has no path to the peer's AS at that moment.
+# On SCIERA the daemon's segment lookups fail now and then. wireguard-go keeps looking in the
+# background, so configure() only repeats the request.
+NO_PATH = "no path found"
+NO_PATH_RETRY_SECONDS = 90.0
+NO_PATH_RETRY_INTERVAL = 5.0
+
+
+def ping_is_iputils(host: Host) -> bool:
+    """Whether the host's ping is iputils (with -I <address> and -D). GNU inetutils ping is not."""
+    return "iputils" in host.run(["ping", "-V"], check=False, timeout=10).stdout
 
 
 @dataclass(frozen=True)
@@ -215,7 +233,7 @@ class WireguardInstance:
         self.tunnel: Tunnel = experiment.tunnel_of(endpoint.name)
         self.peer: Endpoint = experiment.peer_of(endpoint.name)
         self.private_key, self.public_key = generate_keypair()
-        self.socket_path = f"{UAPI_DIR}/{endpoint.interface}.sock"
+        self.socket_path = f"{uapi_dir(self.run_dir)}/{endpoint.interface}.sock"
         self._local_address: str | None = None
         self._uapi_client: list[str] | None = None
         self._started = False
@@ -252,6 +270,7 @@ class WireguardInstance:
             "USE_BATCH": "1" if tunnel.use_batch else "0",
             "LOG_LEVEL": "verbose",
             "WG_PROCESS_FOREGROUND": "1",
+            "WG_UAPI_DIR": uapi_dir(self.run_dir),
             "SCION_DAEMON_ADDRESS": self.sciond,
             "SCION_LOCAL_IA": f"{ep.isd_as},{self.scion_host}",
             "SCION_PATH_API_ADDRESS": ep.api_address,
@@ -264,7 +283,7 @@ class WireguardInstance:
 
     # -- lifecycle -----------------------------------------------------------------------------
     def start(self) -> int:
-        """Start wireguard-go detached as root. Returns its pid. The JWT never touches an argv:
+        """Start wireguard-go detached, as the host's user. Returns its pid. The JWT never touches an argv:
         the launcher shell on the host reads it from jwt_path (`env_from_files`)."""
         ep = self.endpoint
         if self.host.run(["ip", "link", "show", "dev", ep.interface], check=False,
@@ -281,12 +300,12 @@ class WireguardInstance:
             files["SCION_MARKETPLACE_JWT"] = self.jwt_path
         pid = self.host.start_daemon(
             [self.binary, "-f", ep.interface], env=self.env(), env_from_files=files,
-            log_path=self.log_path, pid_path=self.pid_path, root=True)
+            log_path=self.log_path, pid_path=self.pid_path)
         self._started = True
         return pid
 
     def alive(self) -> bool:
-        return self.host.daemon_alive(self.pid_path, root=True)
+        return self.host.daemon_alive(self.pid_path)
 
     def log_text(self) -> str:
         try:
@@ -305,7 +324,7 @@ class WireguardInstance:
                 raise WireguardError(f"wireguard-go for {self.endpoint.name} on {self.host.name} "
                                      f"exited before it was ready; log {self.log_path}:\n"
                                      f"{self.log_tail()}")
-            if self.host.run(["test", "-S", self.socket_path], check=False, root=True).returncode == 0:
+            if self.host.run(["test", "-S", self.socket_path], check=False).returncode == 0:
                 return
             if time.monotonic() >= deadline:
                 raise WireguardError(f"wireguard-go for {self.endpoint.name} on {self.host.name} "
@@ -321,7 +340,7 @@ class WireguardInstance:
                 raise WireguardError(f"{self.host.name} has no way to reach {self.socket_path} "
                                      f"(needs perl with IO::Socket::UNIX, socat or nc -U)")
             self._uapi_client = _CLIENTS[tool](self.socket_path)
-        result = self.host.run(self._uapi_client, input=request, check=False, root=True)
+        result = self.host.run(self._uapi_client, input=request, check=False)
         if result.returncode != 0:
             raise WireguardError(f"UAPI request to {self.endpoint.name} on {self.host.name} failed: "
                                  f"{(result.stderr or result.stdout).strip()}")
@@ -344,16 +363,26 @@ class WireguardInstance:
         peer_host = peer_address or self.peer.host
         if not peer_host:
             raise WireguardError(f"the SCION host of peer {self.peer.name} is unknown: pass peer_address")
-        self.uapi(peer_transaction(
+        request = peer_transaction(
             self.private_key, self.endpoint.listen_port, peer_public_key, self.peer.tunnel_ip,
-            self.peer.isd_as, peer_host, self.peer.listen_port, self.tunnel.persistent_keepalive))
+            self.peer.isd_as, peer_host, self.peer.listen_port, self.tunnel.persistent_keepalive,
+            self.endpoint.path_filter)
+        deadline = time.monotonic() + NO_PATH_RETRY_SECONDS
+        while True:
+            try:
+                self.uapi(request)
+                return
+            except WireguardError as err:
+                if NO_PATH not in str(err) or time.monotonic() >= deadline:
+                    raise
+            # The transaction is idempotent: the same key, port and peer are set again.
+            time.sleep(NO_PATH_RETRY_INTERVAL)
 
-    def set_path_filter(self) -> bool:
-        """Restrict the paths to the peer's AS to endpoint.path_filter, and read it back. False if none."""
+    def check_path_filter(self) -> bool:
+        """Read back that endpoint.path_filter, which configure() set, is in force. False if none."""
         sequence = self.endpoint.path_filter
         if sequence is None:
             return False
-        self.uapi(path_filter_request(self.peer.isd_as, sequence))
         expected = f"scion_path_filter={self.peer.isd_as} {sequence}"
         status = self.uapi("get=1\n\n")
         if expected not in status.splitlines():
@@ -452,10 +481,10 @@ class WireguardInstance:
     # -- teardown ------------------------------------------------------------------------------
     def stop(self) -> bool:
         """Stop by pidfile only; delete only this instance's interface and socket. True if it ran."""
-        ran = self.host.stop_daemon(self.pid_path, root=True)
+        ran = self.host.stop_daemon(self.pid_path)
         if self._started or ran:
             self.host.run(["ip", "link", "del", "dev", self.endpoint.interface], check=False, root=True)
-            self.host.run(["rm", "-f", "--", self.socket_path], check=False, root=True)
+            self.host.run(["rm", "-f", "--", self.socket_path], check=False)
         self._started = False
         return ran
 
@@ -473,9 +502,12 @@ def wait_for_tunnel(host: Host, src_ip: str, dst_ip: str, timeout: float,
     """Block until a ping from src_ip to dst_ip passes through the tunnel. Returns the attempts."""
     deadline = time.monotonic() + timeout
     attempt = 0
+    # GNU inetutils ping (e.g. on SCIERA's ufes) has no -I <address>; the route to dst_ip leaves
+    # through the tunnel device anyway, with src_ip as its source.
+    source = ["-I", src_ip] if ping_is_iputils(host) else []
     while time.monotonic() < deadline:
         attempt += 1
-        if host.run(["ping", "-c", "1", "-W", "2", "-I", src_ip, dst_ip], check=False,
+        if host.run(["ping", "-c", "1", "-W", "2", *source, dst_ip], check=False,
                     timeout=10).returncode == 0:
             return attempt
         time.sleep(2)
@@ -486,8 +518,9 @@ def wait_for_tunnel(host: Host, src_ip: str, dst_ip: str, timeout: float,
 
 def bring_up_tunnel(a: WireguardInstance, b: WireguardInstance, timeout: float = 60.0,
                     reservation_timeout: float = 60.0) -> dict[str, str | None]:
-    """Both instances already started: wait for UAPI, exchange keys, configure, filter, bring up,
-    check the APIs, ping both ways, and wait for the reservations of Hummingbird senders.
+    """Both instances already started: wait for UAPI, exchange keys, configure (with the path filter),
+    check the filter, bring up, check the APIs, ping both ways, and wait for the reservations of
+    Hummingbird senders.
 
     Returns {endpoint name: its 'in use' reservation log line or None}.
     """
@@ -496,7 +529,7 @@ def bring_up_tunnel(a: WireguardInstance, b: WireguardInstance, timeout: float =
     a.configure(b.public_key, b.scion_host)
     b.configure(a.public_key, a.scion_host)
     for inst in (a, b):
-        inst.set_path_filter()
+        inst.check_path_filter()
         inst.bring_up()
     for inst in (a, b):
         inst.check_api()
@@ -515,14 +548,14 @@ def cleanup_leftovers(host: Host, run_dir: str, interfaces: list[str]) -> list[s
     Returns what was stopped/removed."""
     done: list[str] = []
     found = host.run(["bash", "-c", 'compgen -G "$1/runs/*/wg-*.pid" || true', "bash", run_dir.rstrip("/")],
-                     check=False, root=True).stdout.split()
+                     check=False).stdout.split()
     for pid_path in found:
-        if host.stop_daemon(pid_path, root=True):
+        if host.stop_daemon(pid_path):
             done.append(pid_path)
     for interface in interfaces:
         if not interface.startswith("wgx-"):
             continue
         if host.run(["ip", "link", "del", "dev", interface], check=False, root=True).returncode == 0:
             done.append(interface)
-        host.run(["rm", "-f", "--", f"{UAPI_DIR}/{interface}.sock"], check=False, root=True)
+        host.run(["rm", "-f", "--", f"{uapi_dir(run_dir)}/{interface}.sock"], check=False)
     return done

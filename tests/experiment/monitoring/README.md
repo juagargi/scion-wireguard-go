@@ -59,7 +59,7 @@ every second, and shows the last 15 minutes. Panels:
 - Traffic rate per endpoint; send-receive gap per direction
 - Workload goodput, copy progress, state timeline, verification results
 - Ping RTT p95, jitter, loss per minute
-- Best-effort loss per minute; reservation setup (p95 and count by result); reservations bought
+- Marketplace roundtrip: the duration of each successful reservation purchase
 - wireguard-go errors
 - Border-router panels copied from hummbwtester (queue depths, demotions, priority drops, BFD, CPU scheduling, kernel receive overflows)
 

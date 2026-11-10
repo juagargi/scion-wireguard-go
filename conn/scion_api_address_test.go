@@ -192,3 +192,60 @@ func TestBuyReservationUsesMarketplaceAddress(t *testing.T) {
 		t.Errorf("request carries %q, want %q", got.MarketplaceAddress, address)
 	}
 }
+
+// TestBuyReservationCachesMarketplacePaths checks that every purchase looks up its marketplace
+// through the same cache, and that a failed purchase empties it so that the retry looks the
+// path up afresh.
+func TestBuyReservationCachesMarketplacePaths(t *testing.T) {
+	market := addr.MustParseIA("1-ff00:0:112")
+	var queriers []snet.PathQuerier
+	fail := false
+	orig := oneShotReservation
+	oneShotReservation = func(ctx context.Context, _ snet.Path, _ string, q snet.PathQuerier,
+		_ snet.Topology, _ bool, _ marketplace.ReservationRequest,
+	) (*snetpath.Reservation, error) {
+		queriers = append(queriers, q)
+		if _, err := q.Query(ctx, market); err != nil {
+			return nil, err
+		}
+		if fail {
+			return nil, fmt.Errorf("sold out")
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() { oneShotReservation = orig })
+
+	dst := addr.MustParseIA("1-ff00:0:111")
+	d := &fakeDaemon{refreshed: []snet.Path{testPath(2)}, paths: []snet.Path{testPath(2)}}
+	pm := newTestPathManager(t, d)
+	pm.humm = DefaultHummingbirdConfig()
+	pm.humm.Duration = time.Minute
+	pm.metrics = wireguardMetrics
+	pm.RegisterEndpoint(dst)
+	cached := func() bool {
+		c := pm.marketplacePaths()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.entries[market] != nil
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, _, err := pm.buyReservation(context.Background(), dst, time.Now()); err != nil {
+			t.Fatalf("purchase %d: %v", i, err)
+		}
+	}
+	if len(queriers) != 2 || queriers[0] != queriers[1] || queriers[0] != snet.PathQuerier(pm.marketplacePaths()) {
+		t.Fatalf("the purchases did not share the path manager's cache: %v", queriers)
+	}
+	if !cached() {
+		t.Fatalf("the path to the marketplace was not cached")
+	}
+
+	fail = true
+	if _, _, err := pm.buyReservation(context.Background(), dst, time.Now()); err == nil {
+		t.Fatalf("the failing purchase succeeded")
+	}
+	if cached() {
+		t.Errorf("a failed purchase kept the cached path to the marketplace")
+	}
+}

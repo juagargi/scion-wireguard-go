@@ -116,7 +116,11 @@ PROMETHEUS_QUERIES = {
     "demoted_freshness": "sum(increase(router_humm_demoted_freshness_total[{w}s])) or on() vector(0)",
     "demoted_expired": "sum(increase(router_humm_demoted_expired_total[{w}s])) or on() vector(0)",
     "demoted_tokenbucket": "sum(increase(router_humm_demoted_tokenbucket_total[{w}s])) or on() vector(0)",
-    "priority_drops": 'sum(increase(router_dropped_priority_pkts_total{{reason="busy_forwarder"}}[{w}s])) or on() vector(0)',
+    # Priority drops for either reason; the two below single out a downed egress interface
+    # (BFD down), for priority traffic and for all traffic.
+    "priority_drops": 'sum(increase(router_dropped_priority_pkts_total{{reason=~"busy_forwarder|egress_down"}}[{w}s])) or on() vector(0)',
+    "priority_drops_egress_down": 'sum(increase(router_dropped_priority_pkts_total{{reason="egress_down"}}[{w}s])) or on() vector(0)',
+    "drops_egress_down": 'sum(increase(router_dropped_pkts_total{{reason="egress_down"}}[{w}s])) or on() vector(0)',
     "receive_overflows": "sum(increase(router_underlay_receive_overflow_pkts_total[{w}s])) or on() vector(0)",
 }
 
@@ -190,6 +194,9 @@ def render_summary(result: RunResult) -> str:
     for r in rows:
         lines.append("  " + "  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip())
     for w in result.workloads:
+        sent, lost = w.details.get("datagrams"), w.details.get("lost_datagrams")
+        if sent:
+            lines.append(f"  {w.id}: lost {lost or 0} of {sent} datagrams ({100 * (lost or 0) / sent:.1f}%)")
         if w.error:
             lines.append(f"  {w.id}: {w.error}")
     if result.senders:

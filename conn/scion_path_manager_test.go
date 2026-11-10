@@ -2,10 +2,19 @@ package conn
 
 import (
 	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/daemon"
+	"github.com/scionproto/scion/pkg/daemon/types"
+	"github.com/scionproto/scion/pkg/hummingbird/marketplace"
+	"github.com/scionproto/scion/pkg/segment/iface"
 	"github.com/scionproto/scion/pkg/snet"
+	snetpath "github.com/scionproto/scion/pkg/snet/path"
 	"github.com/scionproto/scion/private/path/pathpol"
 )
 
@@ -40,7 +49,7 @@ func TestPathManagerFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &fakeDaemon{refreshed: []snet.Path{testPath(2), testPath(3), testPath(4)}}
+	d := &fakeDaemon{paths: []snet.Path{testPath(2), testPath(3), testPath(4)}}
 
 	// A filter given at creation applies from the first lookup on.
 	pm := newTestPathManager(t, d, WithPathFilters(map[addr.IA]*pathpol.Sequence{dst: via3}))
@@ -86,4 +95,194 @@ func TestPathManagerFilter(t *testing.T) {
 	if _, tracked := pm.cache[other]; tracked {
 		t.Errorf("setting a filter started tracking %s", other)
 	}
+}
+
+// syncDaemon is a daemon whose answers can change while a manager's goroutines ask it.
+type syncDaemon struct {
+	daemon.Connector
+	mu               sync.Mutex
+	paths            []snet.Path
+	refreshes, calls int
+}
+
+func (d *syncDaemon) Paths(_ context.Context, _, _ addr.IA, f types.PathReqFlags) ([]snet.Path, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls++
+	if f.Refresh {
+		d.refreshes++
+	}
+	return d.paths, nil
+}
+
+func (d *syncDaemon) set(paths ...snet.Path) {
+	d.mu.Lock()
+	d.paths = paths
+	d.mu.Unlock()
+}
+
+func (d *syncDaemon) counts() (calls, refreshes int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls, d.refreshes
+}
+
+func newSyncPathManager(t *testing.T, d *syncDaemon) *PathManager {
+	pm := newTestPathManager(t, &fakeDaemon{})
+	pm.d = d
+	return pm
+}
+
+// expiringPath is testPath(egress) that expires at expiry.
+func expiringPath(egress iface.ID, expiry time.Time) snet.Path {
+	p := testPath(egress).(snetpath.Path)
+	p.Meta.Expiry = expiry
+	return p
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPathManagerPeriodicRefreshUsesDaemonCache(t *testing.T) {
+	dst := addr.MustParseIA("1-ff00:0:111")
+	d := &syncDaemon{paths: []snet.Path{testPath(2)}}
+	pm := newSyncPathManager(t, d)
+	pm.RegisterEndpoint(dst)
+	pm.refreshAll()
+	if _, refreshes := d.counts(); refreshes != 0 {
+		t.Errorf("periodic refreshes bypassed the daemon cache %d times", refreshes)
+	}
+}
+
+func TestPathManagerKeepsUnexpiredPathsOnEmptyAnswer(t *testing.T) {
+	dst := addr.MustParseIA("1-ff00:0:111")
+	future := time.Now().Add(time.Hour)
+	d := &syncDaemon{paths: []snet.Path{expiringPath(2, future), expiringPath(3, future)}}
+	pm := newSyncPathManager(t, d)
+	pm.RegisterEndpoint(dst)
+
+	d.set()
+	if err := pm.refreshOne(dst, false); !errors.Is(err, errNoPathsKeptOld) {
+		t.Fatalf("want errNoPathsKeptOld, got %v", err)
+	}
+	if got := len(pm.getPaths(dst)); got != 2 {
+		t.Fatalf("an empty answer replaced the cached paths: %d left, want 2", got)
+	}
+	if _, err := pm.GetPath(dst); err != nil {
+		t.Errorf("no path to use after an empty answer: %v", err)
+	}
+
+	// The retry loop asks again and picks up the paths as soon as they are back.
+	d.set(expiringPath(4, future))
+	waitFor(t, "the retry to replace the paths", func() bool {
+		paths := pm.getPaths(dst)
+		return len(paths) == 1 && paths[0].Metadata().Interfaces[0].ID == 4
+	})
+	if _, refreshes := d.counts(); refreshes == 0 {
+		t.Errorf("the retry did not force a lookup")
+	}
+	waitFor(t, "the retry loop to end", func() bool {
+		pm.mu.RLock()
+		defer pm.mu.RUnlock()
+		return !pm.retrying[dst]
+	})
+}
+
+func TestPathManagerEmptyAnswerReplacesExpiredPaths(t *testing.T) {
+	dst := addr.MustParseIA("1-ff00:0:111")
+	d := &syncDaemon{paths: []snet.Path{expiringPath(2, time.Now().Add(-time.Minute))}}
+	pm := newSyncPathManager(t, d)
+	pm.RegisterEndpoint(dst)
+	d.set()
+	if err := pm.refreshOne(dst, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(pm.getPaths(dst)); got != 0 {
+		t.Errorf("expired paths survived an empty answer: %d left", got)
+	}
+}
+
+func TestPathManagerReportPathFailureForcesRefresh(t *testing.T) {
+	dst := addr.MustParseIA("1-ff00:0:111")
+	d := &syncDaemon{paths: []snet.Path{testPath(2)}}
+	pm := newSyncPathManager(t, d)
+	pm.RegisterEndpoint(dst)
+
+	d.set(testPath(3))
+	pm.ReportPathFailure(dst)
+	waitFor(t, "the forced refresh", func() bool {
+		paths := pm.getPaths(dst)
+		return len(paths) == 1 && paths[0].Metadata().Interfaces[0].ID == 3
+	})
+	_, refreshes := d.counts()
+	if refreshes != 1 {
+		t.Errorf("want one forced lookup, got %d", refreshes)
+	}
+
+	// Reports in quick succession do not hammer the daemon.
+	pm.ReportPathFailure(dst)
+	pm.ReportPathFailure(dst)
+	time.Sleep(50 * time.Millisecond)
+	if _, refreshes = d.counts(); refreshes != 1 {
+		t.Errorf("repeated failure reports forced %d lookups, want 1", refreshes)
+	}
+}
+
+func TestPathManagerRetriesWithoutCachedPaths(t *testing.T) {
+	dst := addr.MustParseIA("1-ff00:0:111")
+	d := &syncDaemon{}
+	pm := newSyncPathManager(t, d)
+	pm.RegisterEndpoint(dst)
+	if got := len(pm.getPaths(dst)); got != 0 {
+		t.Fatalf("want no paths yet, got %d", got)
+	}
+
+	// The retry loop finds the paths as soon as the daemon has them, long before a periodic refresh.
+	d.set(testPath(2))
+	waitFor(t, "the retry to find the paths", func() bool { return len(pm.getPaths(dst)) == 1 })
+}
+
+func TestPathManagerBuysOnlyForAcceptedEndpoints(t *testing.T) {
+	var purchases atomic.Int32
+	orig := oneShotReservation
+	oneShotReservation = func(context.Context, snet.Path, string, snet.PathQuerier, snet.Topology, bool,
+		marketplace.ReservationRequest,
+	) (*snetpath.Reservation, error) {
+		purchases.Add(1)
+		return nil, errors.New("stop")
+	}
+	t.Cleanup(func() { oneShotReservation = orig })
+
+	dst := addr.MustParseIA("1-ff00:0:111")
+	d := &syncDaemon{paths: []snet.Path{testPath(2)}}
+	pm := newSyncPathManager(t, d)
+	pm.humm = DefaultHummingbirdConfig()
+	pm.humm.Enabled = true
+	pm.humm.Duration = time.Minute
+	pm.humm.MarketplaceAddress = "[71-2:0:5c,127.0.0.1]:31888"
+
+	// Paths are known, but no endpoint was accepted: nothing is bought, however often they refresh.
+	pm.RegisterEndpoint(dst)
+	pm.refreshAll()
+	if err := pm.refreshOne(dst, true); err != nil {
+		t.Fatal(err)
+	}
+	pm.mu.RLock()
+	started := pm.cache[dst].CancelRenewal != nil
+	pm.mu.RUnlock()
+	if started || purchases.Load() != 0 {
+		t.Fatalf("a destination without an accepted endpoint buys: renewal %v, %d purchases",
+			started, purchases.Load())
+	}
+
+	pm.AcceptEndpoint(dst)
+	waitFor(t, "the first purchase", func() bool { return purchases.Load() >= 1 })
 }

@@ -79,7 +79,7 @@ func UAPIListen(name string, file *os.File) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	uapi.keventFd, err = unix.Open(socketDirectory, unix.O_RDONLY, 0)
+	uapi.keventFd, err = unix.Open(SocketDir(), unix.O_RDONLY, 0)
 	if err != nil {
 		unix.Close(uapi.kqueueFd)
 		return nil, err

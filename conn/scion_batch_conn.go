@@ -470,7 +470,11 @@ func (s *ScionBatchConn) processMessage(
 		return false
 	}
 
-	scionPkt.Bytes = msg.Buffers[0][:msg.N]
+	// scionPkt comes from a pool and may hold a previous packet. Decode only overwrites the
+	// fields of the layers it finds: E2eExtnContents, in particular, is set only when the
+	// packet has an end-to-end extension. A stale one would point into a reused receive
+	// buffer and be taken for this packet's reverse reservation.
+	*scionPkt = snet.Packet{Bytes: msg.Buffers[0][:msg.N]}
 	if err := scionPkt.Decode(); err != nil {
 		metricsv2.CounterInc(s.metrics().ParseErrors)
 		s.logger.Verbosef("Failed to decode SCION packet: %v", err)
@@ -632,6 +636,14 @@ func (s *ScionBatchConn) WriteBatch(
 		fwdRes, revExtn)
 	if err != nil {
 		return err
+	}
+	if revExtn != nil {
+		sizes := make([]int, len(sbufs))
+		for i, b := range sbufs {
+			sizes[i] = len(b)
+		}
+		s.logger.Verbosef("Hummingbird reverse extension sent to %s in a batch of %d packets, sizes %v",
+			scionEp.scionAddr.IA, len(sbufs), sizes)
 	}
 
 	return s.sendBatchWithRetry(ipv4PC, ipv6PC,

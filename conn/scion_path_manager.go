@@ -35,6 +35,17 @@ import (
 // building the PathManager.
 const refreshInterval = 5 * time.Minute
 
+// Retry cadence after the daemon returned no paths while cached ones are still valid:
+// the delay starts at retryMinDelay, doubles after each failure and stays at retryMaxDelay.
+const (
+	retryMinDelay = time.Second
+	retryMaxDelay = 30 * time.Second
+)
+
+// minForcedRefreshGap is the least time between two forced refreshes of one destination,
+// however often its selected path is reported as failing.
+const minForcedRefreshGap = 10 * time.Second
+
 // PathCacheEntry represents a cache entry for paths to a specific IA
 type PathCacheEntry struct {
 	Paths              []snet.Path           // All available paths
@@ -47,6 +58,7 @@ type PathCacheEntry struct {
 	ReservationNextHop *net.UDPAddr          // Underlay next hop of the path it was bought for
 	PendingReverseExtn *slayers.EndToEndExtn // Reverse reservation still to be advertised
 	CancelRenewal      context.CancelFunc    // Cancel routine for renewal loop
+	Accepted           bool                  // A peer endpoint in this IA was accepted: reservations are bought
 }
 
 // PathRank contains ranking information for a single path
@@ -88,7 +100,11 @@ type PathManager struct {
 	// filters restrict the paths to a destination to those matching its sequence.
 	filters map[addr.IA]*pathpol.Sequence
 
-	refresh    time.Duration
+	refresh time.Duration
+	// retrying holds the destinations with a retry loop running; lastForced is when the
+	// daemon was last asked to bypass its cache for each. Both are guarded by mu.
+	retrying   map[addr.IA]bool
+	lastForced map[addr.IA]time.Time
 	httpMu     sync.Mutex   // guards httpServer, which the API start may set asynchronously
 	httpServer *http.Server // Added for the API server
 
@@ -98,6 +114,9 @@ type PathManager struct {
 	// Hummingbird settings
 	humm HummingbirdConfig
 	topo snet.Topology
+	// marketPaths caches the paths to the marketplaces; see marketplacePaths.
+	marketOnce  sync.Once
+	marketPaths *cachingQuerier
 
 	metrics Metrics
 }
@@ -257,17 +276,91 @@ func (pm *PathManager) RegisterEndpoint(ia addr.IA) {
 
 	// Create empty entry and trigger immediate fetch so callers get paths
 	// right away.
-	if err := pm.refreshOne(ia); err != nil {
+	if err := pm.refreshOne(ia, false); err != nil {
 		pm.log.Errorf("SCION path fetch failed for %s: %v", ia, err)
 	}
+}
+
+// ReportPathFailure tells the manager that traffic on the selected path to ia failed. It
+// forces a refresh in the background, bypassing the daemon cache, at most once per
+// minForcedRefreshGap for each destination.
+func (pm *PathManager) ReportPathFailure(ia addr.IA) {
+	pm.mu.Lock()
+	if pm.cache[ia] == nil || pm.retrying[ia] || time.Since(pm.lastForced[ia]) < minForcedRefreshGap {
+		pm.mu.Unlock()
+		return
+	}
+	if pm.lastForced == nil {
+		pm.lastForced = make(map[addr.IA]time.Time)
+	}
+	pm.lastForced[ia] = time.Now()
+	pm.mu.Unlock()
+
+	go func() {
+		if err := pm.refreshOne(ia, true); err != nil {
+			pm.log.Errorf("SCION path refresh after a path failure failed for %s: %v", ia, err)
+		}
+	}()
+}
+
+// anyUnexpired reports whether one of paths is still valid at now. A path that reports
+// no expiry counts as valid.
+func anyUnexpired(paths []snet.Path, now time.Time) bool {
+	for _, p := range paths {
+		if meta := p.Metadata(); meta == nil || meta.Expiry.IsZero() || meta.Expiry.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryRefresh refreshes dest with growing delays until the daemon returns paths again or the
+// manager closes. At most one loop runs for each destination.
+func (pm *PathManager) retryRefresh(dest addr.IA) {
+	pm.mu.Lock()
+	if pm.retrying[dest] {
+		pm.mu.Unlock()
+		return
+	}
+	if pm.retrying == nil {
+		pm.retrying = make(map[addr.IA]bool)
+	}
+	pm.retrying[dest] = true
+	pm.mu.Unlock()
+
+	go func() {
+		defer func() {
+			pm.mu.Lock()
+			delete(pm.retrying, dest)
+			pm.mu.Unlock()
+		}()
+		delay := retryMinDelay
+		for {
+			select {
+			case <-pm.ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			empty, err := pm.fetch(dest, true)
+			if !empty {
+				if err != nil {
+					pm.log.Errorf("SCION path refresh failed for %s: %v", dest, err)
+				}
+				return
+			}
+			if delay *= 2; delay > retryMaxDelay {
+				delay = retryMaxDelay
+			}
+		}
+	}()
 }
 
 // getPaths returns a snapshot of the current paths for a destination IA.  The
 // slice is safe for the caller to modify.
 func (pm *PathManager) getPaths(ia addr.IA) []snet.Path {
 	pm.mu.RLock()
+	defer pm.mu.RUnlock()
 	entry := pm.cache[ia]
-	pm.mu.RUnlock()
 	if entry == nil {
 		return nil
 	}
@@ -279,11 +372,18 @@ func (pm *PathManager) getPaths(ia addr.IA) []snet.Path {
 func (pm *PathManager) GetPath(ia addr.IA) (snet.Path, error) {
 	pm.mu.RLock()
 	entry := pm.cache[ia]
+	var selected snet.Path
+	if entry != nil && len(entry.Paths) > 0 {
+		selected = entry.Paths[entry.SelectedIndex]
+	}
 	pm.mu.RUnlock()
-	if entry == nil || len(entry.Paths) == 0 {
+	if selected == nil {
 		return nil, fmt.Errorf("no path found for IA %s", ia)
 	}
-	return entry.Paths[entry.SelectedIndex], nil
+	if meta := selected.Metadata(); meta != nil && !meta.Expiry.IsZero() && !meta.Expiry.After(time.Now()) {
+		pm.ReportPathFailure(ia)
+	}
+	return selected, nil
 }
 
 // GetReservation returns the Hummingbird reservation currently carrying traffic to ia,
@@ -311,6 +411,10 @@ func (pm *PathManager) TakeReverseExtn(ia addr.IA) *slayers.EndToEndExtn {
 	}
 	extn := entry.PendingReverseExtn
 	entry.PendingReverseExtn = nil
+	if extn != nil {
+		pm.log.Verbosef("Hummingbird reverse reservation for %s advertised at %s",
+			ia, time.Now().UTC().Format("15:04:05.000"))
+	}
 	return extn
 }
 
@@ -322,28 +426,64 @@ func (pm *PathManager) refreshAll() {
 	}
 	pm.mu.RUnlock()
 	for _, ia := range dests {
-		if err := pm.refreshOne(ia); err != nil {
+		if err := pm.refreshOne(ia, false); err != nil {
 			pm.log.Errorf("SCION path refresh failed for %s: %v", ia, err)
 		}
 	}
 }
 
-func (pm *PathManager) refreshOne(dest addr.IA) error {
+// errNoPathsKeptOld is returned by refreshOne when the daemon returned no paths and the
+// cached ones, still valid, were kept.
+var errNoPathsKeptOld = errors.New("daemon returned no paths, keeping the cached ones")
+
+// refreshOne fetches the paths to dest and replaces the cached ones. The daemon answers from
+// its cache unless force is set, which makes it look the segments up again.
+//
+// An empty answer never replaces cached paths that have not expired: they are kept, with a
+// warning (errNoPathsKeptOld). With or without cached paths, a retry loop then asks again after
+// short delays. An empty set that only the path filter produces is applied: without a matching
+// path there is no fallback.
+func (pm *PathManager) refreshOne(dest addr.IA, force bool) error {
+	_, err := pm.fetch(dest, force)
+	return err
+}
+
+// fetch is refreshOne, which also reports whether the daemon gave no usable answer: an error or
+// no paths at all. Then a retry loop is running for dest.
+func (pm *PathManager) fetch(dest addr.IA, force bool) (noAnswer bool, _ error) {
 	ctx, cancel := context.WithTimeout(pm.ctx, 3*time.Second)
 	defer cancel()
 
-	paths, err := pm.d.Paths(ctx, dest, pm.localIA, types.PathReqFlags{Refresh: true})
+	paths, err := pm.d.Paths(ctx, dest, pm.localIA, types.PathReqFlags{Refresh: force})
 	if err != nil {
 		pm.mu.Lock()
 		if entry := pm.cache[dest]; entry != nil {
 			entry.LastError = err
 		}
 		pm.mu.Unlock()
-		return fmt.Errorf("daemon Paths(): %w", err)
+		pm.retryRefresh(dest)
+		return true, fmt.Errorf("daemon Paths(): %w", err)
 	}
 
 	if len(paths) == 0 {
-		pm.log.Verbosef("No paths found from %s to %s", pm.localIA, dest)
+		pm.mu.Lock()
+		var old []snet.Path
+		if entry := pm.cache[dest]; entry != nil {
+			old = entry.Paths
+			if anyUnexpired(old, time.Now()) {
+				entry.LastError = errNoPathsKeptOld
+			}
+		}
+		pm.mu.Unlock()
+		if anyUnexpired(old, time.Now()) {
+			pm.log.Errorf("Warning: no paths found from %s to %s, keeping the %d cached ones and retrying",
+				pm.localIA, dest, len(old))
+			pm.retryRefresh(dest)
+			return true, errNoPathsKeptOld
+		}
+		pm.log.Verbosef("No paths found from %s to %s, retrying", pm.localIA, dest)
+		pm.retryRefresh(dest)
+		noAnswer = true
 	}
 
 	pm.mu.RLock()
@@ -442,13 +582,28 @@ func (pm *PathManager) refreshOne(dest addr.IA) error {
 
 	pm.startRenewalLocked(dest, entry)
 
-	return nil
+	return noAnswer, nil
+}
+
+// AcceptEndpoint tells the manager that a peer endpoint in ia was accepted, which starts
+// keeping a reservation to it. Until then paths to ia are only tracked: an endpoint that was
+// rejected, or that is only being looked at, buys nothing.
+func (pm *PathManager) AcceptEndpoint(ia addr.IA) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	entry := pm.cache[ia]
+	if entry == nil {
+		return
+	}
+	entry.Accepted = true
+	pm.startRenewalLocked(ia, entry)
 }
 
 // startRenewalLocked starts keeping a reservation to dest, unless that is already
-// going on or there is no path to buy it for. The caller holds pm.mu.
+// going on, no endpoint in dest was accepted or there is no path to buy it for.
+// The caller holds pm.mu.
 func (pm *PathManager) startRenewalLocked(dest addr.IA, entry *PathCacheEntry) {
-	if pm.humm.Enabled && entry.CancelRenewal == nil && len(entry.Paths) > 0 {
+	if pm.humm.Enabled && entry.Accepted && entry.CancelRenewal == nil && len(entry.Paths) > 0 {
 		ctx, cancel := context.WithCancel(pm.ctx)
 		entry.CancelRenewal = cancel
 		go pm.reservationRenewalLoop(ctx, dest)
@@ -474,7 +629,7 @@ func (pm *PathManager) SetPathFilter(dest addr.IA, sequence *pathpol.Sequence) e
 	if !tracked {
 		return nil
 	}
-	if err := pm.refreshOne(dest); err != nil {
+	if err := pm.refreshOne(dest, false); err != nil {
 		return err
 	}
 
@@ -652,6 +807,21 @@ func (pm *PathManager) buyReservationWithRetry(
 	return nil, nil, lastErr
 }
 
+// marketplacePaths returns the querier the purchases look up the path to their marketplace
+// with: the daemon's, behind a cache that answers at once while its paths are valid and
+// refreshes them in the background.
+func (pm *PathManager) marketplacePaths() *cachingQuerier {
+	pm.marketOnce.Do(func() {
+		ctx := pm.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		pm.marketPaths = newCachingQuerier(ctx,
+			pm.humm.marketplaceQuerier(pm.d, pm.localIA, pm.log), pm.log)
+	})
+	return pm.marketPaths
+}
+
 // oneShotReservation buys a reservation from a marketplace. A variable so tests can replace it.
 var oneShotReservation = marketplace.OneShotReservation
 
@@ -690,7 +860,7 @@ func (pm *PathManager) buyReservation(
 		ctx,
 		path,
 		pm.humm.JWT,
-		pm.humm.marketplaceQuerier(pm.d, pm.localIA, pm.log),
+		pm.marketplacePaths(),
 		pm.topo,
 		pm.humm.Insecure,
 		marketplace.ReservationRequest{
@@ -713,6 +883,8 @@ func (pm *PathManager) buyReservation(
 	pm.metrics.ObserveReservationSetup(time.Since(timerStart), err)
 
 	if err != nil {
+		// The path may be what failed: let the next attempt look it up afresh.
+		pm.marketplacePaths().forget()
 		return nil, nil, fmt.Errorf("marketplace reservation: %w", err)
 	}
 	return rsv, path.UnderlayNextHop(), nil
@@ -740,6 +912,8 @@ func (pm *PathManager) installReservation(
 	entry.ForwardReservation = rsv
 	entry.ReservationNextHop = nextHop
 	entry.PendingReverseExtn = extn
+	pm.log.Verbosef("Hummingbird reservation for %s installed at %s (reverse extension pending: %t)",
+		dest, time.Now().UTC().Format("15:04:05.000"), extn != nil)
 }
 
 // dropExpiredReservation forgets the reservation of dest once it has expired,

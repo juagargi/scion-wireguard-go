@@ -78,6 +78,8 @@ class Tests(unittest.TestCase):
         srv.shutdown()
         self.assertEqual(out["demoted_freshness"], 7.0)
         self.assertIsNone(out["priority_drops"])
+        self.assertIsNone(out["priority_drops_egress_down"])
+        self.assertIn("drops_egress_down", out)
         self.assertTrue(out["demoted_expired"].startswith("error"))
         dead = R.query_prometheus("http://127.0.0.1:1", 100, 160, timeout=0.5)
         self.assertTrue(all(str(v).startswith("error") for k, v in dead.items() if k != "window_s"))
@@ -94,6 +96,11 @@ class Tests(unittest.TestCase):
         self.assertTrue(s.endswith("FAIL"))
         self.assertTrue(R.render_summary(run([wl()])).endswith("PASS"))
         self.assertIn("INTERRUPTED", R.render_summary(run([wl()], True)))
+
+    def test_summary_udp_loss(self):
+        be = wl(role="background", id="be")
+        be.details = {"datagrams": 1653865, "lost_datagrams": 933996}
+        self.assertIn("be: lost 933996 of 1653865 datagrams (56.5%)", R.render_summary(run([wl(), be])))
 
 
 if __name__ == "__main__":

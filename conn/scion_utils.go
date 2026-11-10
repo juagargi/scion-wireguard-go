@@ -128,8 +128,13 @@ func Serialize(p *snet.Packet, fwdRes *snetpath.Reservation, revExtn *slayers.En
 	var e2eLen int
 	var e2eBytes []byte
 	if revExtn != nil {
+		// The extension sits between the SCION header and UDP, so it must name UDP as
+		// its next header, as snet does. Left at 0, routers cannot find the UDP port
+		// and deliver the packet to the end-host (dispatcher) port instead.
+		extn := *revExtn
+		extn.NextHdr = slayers.L4UDP
 		serializeBuf := gopacket.NewSerializeBuffer()
-		if err := revExtn.SerializeTo(serializeBuf, gopacket.SerializeOptions{FixLengths: true}); err != nil {
+		if err := extn.SerializeTo(serializeBuf, gopacket.SerializeOptions{FixLengths: true}); err != nil {
 			return fmt.Errorf("serializing E2E extension: %w", err)
 		}
 		e2eBytes = serializeBuf.Bytes()

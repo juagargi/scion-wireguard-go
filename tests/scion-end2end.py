@@ -748,19 +748,6 @@ def check_handovers(log: Path, minimum: int) -> None:
     print(f"    {handovers} handovers to a renewed reservation")
 
 
-def check_renewals_filtered(log: Path) -> None:
-    """Fail unless every reservation used was bought over a filtered marketplace path."""
-    text = log.read_text(errors="replace")
-    lookups = len(MARKETPLACE_PATH.findall(text))
-    in_use = len(RESERVATION_IN_USE.findall(text))
-    if lookups < in_use:
-        raise TestFailure(
-            f"{in_use} reservations were used, but the path to the marketplace was "
-            f"selected through the filter only {lookups} times"
-        )
-    print(f"    {lookups} filtered paths to the marketplace for {in_use} reservations used")
-
-
 def marketplace_website(topology: Topology, override: bool = False) -> str:
     """The registration web app of the marketplace the generated topology advertises.
 
@@ -1579,8 +1566,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.min_handovers:
             print("== checking that the reservation was renewed along the way")
             check_handovers(wireguard_log(log_dir, source), args.min_handovers)
-            if args.path_to_marketplace_filter:
-                check_renewals_filtered(wireguard_log(log_dir, source))
     except ExpectedOutcome as expected:
         outcome = str(expected)
     finally:

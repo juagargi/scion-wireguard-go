@@ -29,16 +29,21 @@ test: test-go test-experiment
 test-go:
 	go test ./...
 
-# Unit tests of the experiment runner (tests/experiment). They need no Docker. Tests that need
-# PyYAML, jsonschema or SCION_DIR are skipped without them. -b hides the output of passing tests
-# (preflight messages, warnings) and shows it only for the tests that fail.
-test-experiment:
-	python3 -m unittest discover -b -s tests/experiment -p 'test_*.py'
+# The SCION checkout (hummingbird fork) the Python tests use; the same default as
+# tests/scion-integration.py. Override it with e.g. make test SCION_DIR=~/scion
+SCION_DIR ?= $(abspath $(CURDIR)/../scion)
+# The Python of the virtual environment in .venv when there is one, else python3.
+PYTHON ?= $(if $(wildcard .venv/bin/python3),.venv/bin/python3,python3)
 
-# Runs every SCION integration test on a running tiny topology. Point it at the
-# checkout holding that topology with SCION_DIR, e.g. make test-integration SCION_DIR=~/scion
+# Unit tests of the experiment runner (tests/experiment). They need no Docker. Tests that need
+# PyYAML, jsonschema or a SCION_DIR holding tools/hummbwtester are skipped without them. -b hides
+# the output of passing tests (preflight messages, warnings) and shows it only for those that fail.
+test-experiment:
+	SCION_DIR="$(SCION_DIR)" $(PYTHON) -m unittest discover -b -s tests/experiment -p 'test_*.py'
+
+# Runs every SCION integration test on a running tiny topology in SCION_DIR.
 test-integration:
-	./tests/scion-integration.py $(if $(SCION_DIR),--scion-dir "$(SCION_DIR)") --test-all
+	$(PYTHON) ./tests/scion-integration.py --scion-dir "$(SCION_DIR)" --test-all
 
 clean:
 	rm -f wireguard-go

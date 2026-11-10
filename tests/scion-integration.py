@@ -108,8 +108,9 @@ TESTS: dict[str, Case] = {
         # apply: each names every hop of the only path through the core AS.
         # Short reservations hand over about every 11 s (the 20 s lifetime minus the
         # 8 s overlap and the 1 s start offset). At the default 80 Mbps 224 MiB take
-        # about 23 s, enough for two handovers, each of them a purchase that has to
-        # find its path to the marketplace through the filter again. The 12 s ahead
+        # about 23 s, enough for two handovers. The renewals reuse the path to the
+        # marketplace that the filter selected for the first purchase: wireguard-go caches
+        # it for 30 s and only ever caches what the filter returned. The 12 s ahead
         # covers the 10 s purchase timeout of wireguard-go.
         # The partial reservation leaves out the core AS, which the traffic then crosses
         # as a plain SCION hop.

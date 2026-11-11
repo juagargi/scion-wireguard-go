@@ -472,6 +472,7 @@ class Run:
         prometheus: dict = {}
         try:
             self.sleep(max(exp.monitoring.scrape_interval_seconds, 1.0) * 2)  # let a scrape land
+            self.infra.wait_metrics_delivered(end)
             prometheus = results_mod.query_prometheus(self.infra.prometheus_url, self.started, end)
         except Exception as err:  # noqa: BLE001
             prometheus = {"error": str(err)}

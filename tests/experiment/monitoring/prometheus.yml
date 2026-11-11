@@ -1,6 +1,13 @@
 global:
   scrape_interval: 1s
 
+storage:
+  tsdb:
+    # Accept samples that the SSH deployment's Prometheus agents buffered while they could not
+    # deliver; without it, samples older than about an hour are refused and the agents drop
+    # them. Keep it at least the agents' retention (hummbwtester's ssh_setup.AGENT_RETENTION).
+    out_of_order_time_window: 180d
+
 scrape_configs:
   # wireguard-go endpoints. Target labels (experiment, tunnel, endpoint, peer, class, ...)
   # win over any label of the same name in the scraped series (honor_labels is false).

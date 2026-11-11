@@ -352,6 +352,13 @@ class ReuseAPI(unittest.TestCase):
             (ss, "target_documents_for", ["inventory", "sources", "target_files"]),
             (ss, "tunnel_specs_for", ["inventory", "sources"]),
             (ss, "prometheus_forward", ["inventory"]),
+            (ss, "agent_specs_for", ["inventory", "sources"]),
+            (ss, "central_sources", ["inventory", "sources"]),
+            (ss, "agent_tunnel_specs", ["inventory", "agents", "forward_port"]),
+            (ss, "ensure_agents", ["inventory", "agents", "dry_run", "stack"]),
+            (ss, "check_agents_delivering", ["inventory", "agents", "stack"]),
+            (ss, "stop_agents", ["inventory", "agents", "stack"]),
+            (ss, "agent_delivery", ["host", "stack"]),
             (remote, "check_clocks", ["hosts"]),
         ]
         for module, name, parameters in functions:
@@ -375,6 +382,8 @@ class ReuseAPI(unittest.TestCase):
             (hb.ssh_setup, "TunnelSpec", ["source_alias", "prometheus_alias", "port",
                                           "source_address"]),
             (hb.ssh_setup, "PrometheusForward", ["alias", "port", "binds"]),
+            (hb.ssh_setup, "AgentSpec", ["host", "sources", "write_port"]),
+            (hb.ssh_setup, "AgentDelivery", ["newest_scraped", "newest_sent", "failed"]),
             (hb.orchestration, "MarketplaceConfig", [
                 "username", "password_env", "sub_account", "host", "scion_address", "interfaces",
                 "location_override"]),
@@ -729,14 +738,39 @@ class SSHFlow(unittest.TestCase):
     def test_target_documents(self):
         docs = {k: json.loads(v) for k, v in self.make().target_documents().items()}
         self.assertEqual(set(docs), set(infra.TARGET_FILES))
-        # Prometheus runs on ufms: B and D are scraped directly, A and C through their relays
+        # Prometheus runs on ufms: it scrapes B, D and ufms's router directly and the runner
+        # through its relay; the agents on rnp and ufes deliver the rest
         self.assertEqual([t["targets"] for t in docs["targets/wireguard.json"]],
-                         [["127.0.0.1:19190"], ["127.0.0.1:28015"], ["127.0.0.1:19192"],
-                          ["127.0.0.1:28016"]])
+                         [["127.0.0.1:28015"], ["127.0.0.1:28016"]])
         self.assertEqual(docs["targets/runner.json"],
                          [{"targets": ["127.0.0.1:19194"], "labels": {"experiment": sciera_experiment().name}}])
         self.assertEqual([t["targets"] for t in docs["targets/border_routers.json"]],
-                         [["127.0.0.1:19195"], ["127.0.0.1:19196"], ["127.0.0.1:38401"]])
+                         [["127.0.0.1:38401"]])
+
+    def test_agents(self):
+        i = self.make()
+        agents = i.agents()
+        self.assertEqual([(a.host, a.write_port, [s.port for s in a.sources]) for a in agents],
+                         [("rnp", 19190, [19190, 19195]), ("ufes", 19192, [19192, 19196])])
+        specs = self.hb.ssh_setup.agent_tunnel_specs(i.inventory, agents, 8091)
+        self.assertEqual([(s.source_alias, s.prometheus_alias, s.port, s.source_address)
+                          for s in specs], [
+            (None, "sciera-rnp", 19190, "127.0.0.1:8091"),
+            (None, "sciera-ufes", 19192, "127.0.0.1:8091"),
+        ])
+        documents, _ = self.hb.ssh_setup.agent_documents(agents[0], i.stack)
+        # the agent scrapes with our jobs and writes every file-SD file of our prometheus.yml
+        self.assertEqual(sorted(documents), ["docker-compose.yml", "prometheus.yml",
+                                             *sorted(infra.TARGET_FILES)])
+        self.assertIn("wgexp-prometheus-agent", documents["docker-compose.yml"])
+        self.assertIn("/var/tmp/wgexp-prometheus/prometheus.yml", documents["docker-compose.yml"])
+        self.assertIn('"127.0.0.1:38401"', documents["targets/border_routers.json"])
+
+    def test_prometheus_accepts_the_agents_backlog(self):
+        import yaml
+        config = yaml.safe_load((HERE / "monitoring" / "prometheus.yml").read_text())
+        self.assertEqual(config["storage"]["tsdb"]["out_of_order_time_window"],
+                         self.hb.ssh_setup.AGENT_RETENTION)
 
     def test_relay_specs(self):
         i = self.make()
@@ -765,8 +799,12 @@ class SSHFlow(unittest.TestCase):
         patches = [
             mock.patch.object(ss, "ensure_prometheus",
                               lambda inv, t, dry, stack=None: calls.append(("prometheus", t, dry, stack))),
+            mock.patch.object(ss, "ensure_agents",
+                              lambda inv, agents, dry, stack=None: calls.append(("agents", agents, dry, stack))),
             mock.patch.object(ss, "ensure_tunnels",
                               lambda specs, fwd, dry, stack=None: calls.append(("tunnels", specs, fwd, dry, stack))),
+            mock.patch.object(ss, "check_agents_delivering",
+                              lambda inv, agents, stack=None: calls.append(("delivering", agents, stack))),
             mock.patch.object(ss, "ensure_grafana",
                               lambda fwd, dry, stack=None: calls.append(
                                   ("grafana", dry, stack, os.environ.get("GRAFANA_PORT")))),
@@ -780,14 +818,20 @@ class SSHFlow(unittest.TestCase):
                         else os.environ.pop("GRAFANA_PORT", None))
         with mock.patch("builtins.print"):
             self.assertEqual(i.setup_monitoring(), [])
-        self.assertEqual([c[0] for c in calls], ["prometheus", "tunnels", "grafana"])
-        self.assertEqual(set(calls[0][1]), set(infra.TARGET_FILES))
-        self.assertIs(calls[0][3], calls[1][4])
-        self.assertEqual(calls[0][3].prometheus_container, "wgexp-prometheus")
-        self.assertEqual(len(calls[1][1]), 5)
-        self.assertIs(calls[1][2], forward)
-        self.assertEqual(calls[2][3], "3001")
-        self.assertEqual((calls[0][2], calls[1][3], calls[2][1]), (False, False, False))
+        self.assertEqual([c[0] for c in calls],
+                         ["prometheus", "agents", "tunnels", "delivering", "grafana"])
+        prometheus, agents, tunnels, delivering, grafana = calls
+        self.assertEqual(set(prometheus[1]), set(infra.TARGET_FILES))
+        self.assertTrue(prometheus[3] is agents[3] is tunnels[4] is delivering[2] is i.stack)
+        self.assertEqual(prometheus[3].prometheus_container, "wgexp-prometheus")
+        self.assertEqual([a.host for a in agents[1]], ["rnp", "ufes"])
+        self.assertEqual(delivering[1], agents[1])
+        # the runner's relay and one -R tunnel per agent
+        self.assertEqual([(s.source_alias, s.prometheus_alias, s.port) for s in tunnels[1]], [
+            (None, "sciera-ufms", 19194), (None, "sciera-rnp", 19190), (None, "sciera-ufes", 19192)])
+        self.assertIs(tunnels[2], forward)
+        self.assertEqual(grafana[3], "3001")
+        self.assertEqual((prometheus[2], agents[2], tunnels[3], grafana[1]), (False,) * 4)
         # the targets are also written locally
         self.assertEqual(sorted(p.name for p in (Path(self.tmp.name) / "prometheus").iterdir()),
                          ["border_routers.json", "runner.json", "wireguard.json"])
@@ -797,12 +841,14 @@ class SSHFlow(unittest.TestCase):
         i = self.make(dry_run=True)
         forward = SimpleNamespace(port=8091, binds=("127.0.0.1",))
         with mock.patch.object(ss, "ensure_prometheus", lambda inv, t, dry, stack=None: flags.append(dry)), \
+                mock.patch.object(ss, "ensure_agents", lambda inv, a, dry, stack=None: flags.append(dry)), \
                 mock.patch.object(ss, "ensure_tunnels", lambda s, f, dry, stack=None: flags.append(dry)), \
+                mock.patch.object(ss, "check_agents_delivering", side_effect=AssertionError), \
                 mock.patch.object(ss, "ensure_grafana", lambda f, dry, stack=None: flags.append(dry)), \
                 mock.patch.object(ss, "prometheus_forward", lambda inv: forward), \
                 mock.patch("builtins.print"):
             self.assertEqual(i.setup_monitoring(), [])
-        self.assertEqual(flags, [True, True, True])
+        self.assertEqual(flags, [True, True, True, True])
         self.assertFalse((Path(self.tmp.name) / "prometheus").exists())
 
     def test_setup_infrastructure_order_and_manual_steps(self):
@@ -907,6 +953,35 @@ class SSHFlow(unittest.TestCase):
                 problems = self.make(dry_run=True).check_clocks()
         self.assertEqual(len(problems), 1)
         self.assertIn("+7.300 s", problems[0])
+
+    def test_wait_metrics_delivered(self):
+        ss = self.hb.ssh_setup
+        i = self.make()
+        answers = {"rnp": [100.0, 205.0], "ufes": [210.0]}
+        asked = []
+
+        def delivery(host, stack=None):
+            self.assertIs(stack, i.stack)
+            asked.append(host.name)
+            sent = answers[host.name].pop(0)
+            return ss.AgentDelivery(sent, sent, 0.0)
+
+        with mock.patch.object(ss, "agent_delivery", delivery), \
+                mock.patch.object(infra.time, "sleep") as sleep:
+            i.wait_metrics_delivered(200.0)
+        self.assertEqual(asked, ["rnp", "ufes", "rnp"])
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_wait_metrics_delivered_gives_up(self):
+        ss = self.hb.ssh_setup
+        i = self.make()
+        clock = iter(range(0, 1000, 10))
+        with mock.patch.object(ss, "agent_delivery", lambda host, stack=None: None), \
+                mock.patch.object(infra.time, "monotonic", lambda: next(clock)), \
+                mock.patch.object(infra.time, "sleep"), \
+                mock.patch("builtins.print") as printed:
+            i.wait_metrics_delivered(200.0)
+        self.assertIn("have not delivered", " ".join(str(c) for c in printed.call_args_list))
 
     def test_binary_gets_net_admin_and_is_checked(self):
         ss = self.hb.ssh_setup
@@ -1029,6 +1104,7 @@ class SSHFlow(unittest.TestCase):
             return f
 
         with mock.patch.object(ss, "remove_selective_qdiscs", rec("qdiscs", RuntimeError("tc down"))), \
+                mock.patch.object(ss, "stop_agents", rec("agents")), \
                 mock.patch.object(ss, "stop_prometheus", rec("prometheus")), \
                 mock.patch.object(ss, "stop_tunnels", rec("tunnels")), \
                 mock.patch.object(ss, "stop_marketplace", rec("marketplace", RuntimeError("still up"))), \
@@ -1038,11 +1114,12 @@ class SSHFlow(unittest.TestCase):
                 mock.patch("builtins.print"):
             errors = i.teardown_infrastructure()
         names = [c[0] for c in calls]
-        self.assertEqual(names[:4], ["qdiscs", "prometheus", "tunnels", "marketplace"])
+        # the agents send their backlog before the tunnels and the central Prometheus go
+        self.assertEqual(names[:5], ["qdiscs", "agents", "tunnels", "prometheus", "marketplace"])
         self.assertEqual(len(errors), 2)
         self.assertIn("tc down", errors[0])
         self.assertIn("still up", errors[1])
-        stacks = [c[1] for c in calls if c[0] in ("prometheus", "tunnels")]
+        stacks = [c[1] for c in calls if c[0] in ("agents", "prometheus", "tunnels")]
         self.assertTrue(all(s is i.stack for s in stacks))
         rms = [c for c in calls if c[0] == "rm"]
         self.assertIn(("rm", "ufms", "rm -rf /var/tmp/wgexp-prometheus"), rms)

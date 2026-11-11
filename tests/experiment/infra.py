@@ -15,7 +15,8 @@ The integrator (experiment.py) uses one object, created once per command::
     problems  = infra.preflight()              # tools, /dev/net/tun, sudo, ports, routes, disk
     binaries  = infra.install_binary(path)     # {host_key: on-host wireguard-go path}
     jwts      = infra.install_jwt()            # {host_key: on-host jwt path} or None
-    failures += infra.setup_monitoring()       # file_sd targets, Prometheus, Grafana, relays
+    failures += infra.setup_monitoring()       # file_sd targets, Prometheus, SSH: agents and
+                                               # tunnels, Grafana
 
     # run (a separate process; nothing from setup needs to be remembered)
     infra.hosts()                  # {host_key: Host}
@@ -23,6 +24,7 @@ The integrator (experiment.py) uses one object, created once per command::
     infra.binary_paths(), infra.jwt_paths(), infra.run_dir(host_key)
     infra.write_targets()          # refresh gen/prometheus/*.json (also done by setup_monitoring)
     infra.grafana_url(start, end), infra.prometheus_url
+    infra.wait_metrics_delivered(end)  # SSH: the agents have sent the samples up to end
 
     # teardown
     errors = infra.teardown_infrastructure()   # list of error strings, empty if everything went well
@@ -104,6 +106,8 @@ TARGET_WIREGUARD = "targets/wireguard.json"
 TARGET_RUNNER = "targets/runner.json"
 TARGET_ROUTERS = "targets/border_routers.json"
 TARGET_FILES = (TARGET_WIREGUARD, TARGET_RUNNER, TARGET_ROUTERS)
+# How long a run waits, before querying Prometheus, for the agents to send its last samples.
+AGENT_WAIT_SECONDS = 30
 
 # Tools every endpoint host needs (device set-up, the tunnel ping check); each workload kind adds its
 # own, only on the hosts at either end of it.
@@ -514,6 +518,9 @@ class Infra:
 
     def setup_monitoring(self) -> list[str]:
         raise NotImplementedError
+
+    def wait_metrics_delivered(self, end: float) -> None:
+        """Wait until Prometheus has every sample up to end (epoch seconds). Never raises."""
 
     def install_binary(self, binary: Path) -> dict[str, str]:
         raise NotImplementedError
@@ -1034,7 +1041,8 @@ class SSHInfra(Infra):
         return failures
 
     def check_clocks(self) -> list[str]:
-        # The analysis compares counters and timestamps across hosts.
+        # The agents stamp samples with their host's clock, and the analysis compares
+        # counters and timestamps across hosts.
         inv = self.inventory
         try:
             self.remote.check_clocks([inv.hosts[name] for name in sorted(inv.hosts)])
@@ -1195,12 +1203,26 @@ class SSHInfra(Infra):
         sources.extend(ss.router_metric_sources(inv, base + n + 1))
         return sources
 
+    def agents(self) -> list[Any]:
+        """One Prometheus agent per host with metric sources, except the Prometheus host.
+
+        Each scrapes its host's sources and remote-writes them to the central Prometheus through
+        an -R tunnel, keeping what it cannot deliver until it can. A relayed scrape, instead,
+        is lost whenever it fails or is late.
+        """
+        return self.ss.agent_specs_for(self.inventory, self.metric_sources())
+
+    def central_sources(self) -> list[Any]:
+        """The sources the central Prometheus scrapes: on its host, or relayed from the controller."""
+        return self.ss.central_sources(self.inventory, self.metric_sources())
+
     def target_documents(self) -> dict[str, str]:
-        return self.ss.target_documents_for(self.inventory, self.metric_sources(), TARGET_FILES)
+        return self.ss.target_documents_for(self.inventory, self.central_sources(), TARGET_FILES)
 
     def setup_monitoring(self) -> list[str]:
         ss, inv, stack, mon = self.ss, self.inventory, self.stack, self.experiment.monitoring
         state: dict[str, Any] = {}
+        agents = self.agents()
 
         def targets() -> None:
             state["documents"] = self.target_documents()
@@ -1215,8 +1237,15 @@ class SSHInfra(Infra):
             ss.ensure_prometheus(inv, state["documents"], self.dry_run, stack=stack)
 
         def relays() -> None:
-            specs = ss.tunnel_specs_for(inv, self.metric_sources())
-            ss.ensure_tunnels(specs, ss.prometheus_forward(inv), self.dry_run, stack=stack)
+            forward = ss.prometheus_forward(inv)
+            specs = [*ss.tunnel_specs_for(inv, self.central_sources()),
+                     *ss.agent_tunnel_specs(inv, agents, forward.port)]
+            ss.ensure_tunnels(specs, forward, self.dry_run, stack=stack)
+            if self.dry_run:
+                if agents:
+                    self._plan(f"check that {len(agents)} Prometheus agents deliver")
+                return
+            ss.check_agents_delivering(inv, agents, stack=stack)
 
         def grafana() -> None:
             # ensure_grafana builds its health-check URL from this variable (default 3000)
@@ -1230,9 +1259,36 @@ class SSHInfra(Infra):
         return self._steps([
             ("1. targets", targets),
             ("2. Prometheus", lambda: (need_documents(), prometheus())),
-            ("3. metric relays", relays),
-            ("4. Grafana", grafana),
+            ("3. Prometheus agents", lambda: ss.ensure_agents(inv, agents, self.dry_run,
+                                                              stack=stack)),
+            ("4. metric tunnels", relays),
+            ("5. Grafana", grafana),
         ])
+
+    def wait_metrics_delivered(self, end: float) -> None:
+        """Wait until every agent has sent its samples up to end (at most AGENT_WAIT_SECONDS).
+
+        The central Prometheus scrapes its own sources itself; the agents deliver theirs a
+        moment later, or much later after an outage of their tunnel.
+        """
+        pending = {agent.host: self.inventory.hosts[agent.host] for agent in self.agents()}
+        deadline = time.monotonic() + AGENT_WAIT_SECONDS
+        while pending:
+            for name, host in list(pending.items()):
+                try:
+                    delivery = self.ss.agent_delivery(host, stack=self.stack)
+                except _RECOVERABLE:
+                    delivery = None
+                if delivery is not None and delivery.newest_sent >= end:
+                    del pending[name]
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                self._say(f"warning: the Prometheus agents on {', '.join(sorted(pending))} have "
+                          f"not delivered the run's last samples after {AGENT_WAIT_SECONDS} s; "
+                          "the Prometheus figures may miss them")
+                return
+            time.sleep(1)
 
     # -- teardown ------------------------------------------------------------------------------
 
@@ -1263,9 +1319,12 @@ class SSHInfra(Infra):
         self._attempt(errors, "remove selective qdiscs",
                       lambda: ss.remove_selective_qdiscs(inv, self.experiment.tc))
         self._attempt(errors, "stop Grafana", self._stop_local_grafana)
+        # The agents first: they send their backlog through the tunnels to the central Prometheus.
+        self._attempt(errors, "stop the Prometheus agents",
+                      lambda: ss.stop_agents(inv, self.agents(), stack=stack))
+        self._attempt(errors, "close the metric tunnels", lambda: ss.stop_tunnels(stack=stack))
         self._attempt(errors, "stop Prometheus",
                       lambda: ss.stop_prometheus(inv.hosts[inv.prometheus_host], stack=stack))
-        self._attempt(errors, "close the metric relays", lambda: ss.stop_tunnels(stack=stack))
         self._attempt(errors, "stop the marketplace", lambda: ss.stop_marketplace(inv))
         prometheus_host = inv.hosts[inv.prometheus_host]
         self._attempt(errors, f"remove {stack.remote_dir} on {prometheus_host.name}",

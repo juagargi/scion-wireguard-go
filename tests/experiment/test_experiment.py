@@ -109,6 +109,9 @@ class FakeInfra:
     def write_targets(self):
         self.calls.append("targets")
 
+    def wait_metrics_delivered(self, end):
+        self.calls.append("delivered")
+
     def grafana_url(self, start, end=None):
         return "http://grafana/d/x"
 

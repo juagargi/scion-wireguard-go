@@ -79,9 +79,14 @@ SSH deployment: `setup` first checks that the controller's and every host's cloc
 and within 0.25 s of each other (`run` checks this again). It also deploys and configures the marketplace on its host,
 applies selective qdiscs on the hosts, may need a manual step for the static-info Note (it prints it),
 copies the binary to each host, starts Prometheus on the monitoring host (files in
-`/var/tmp/wgexp-prometheus`, so they survive a reboot) plus metric relays (SSH tunnels) and a local
-Grafana. `teardown` removes the qdiscs, stops Grafana, Prometheus, the relays **and the marketplace**,
-and removes the setup directories it created on the hosts.
+`/var/tmp/wgexp-prometheus`, so they survive a reboot), and starts a local Grafana.
+Every other host with metric sources (wireguard-go endpoints, border routers) runs a Prometheus agent
+(`wgexp-prometheus-agent`). The agent scrapes locally and remote-writes to the central Prometheus
+through an SSH `-R` tunnel, and keeps what it cannot deliver until it can. Only the runner's metrics on
+the controller are still relayed. Before querying Prometheus for `results.json`, `run` waits up to 30 s for the agents
+to deliver the run's last samples. `teardown` removes the qdiscs, stops Grafana, the agents (after
+they send their backlog), the tunnels, Prometheus **and the marketplace**, and removes the setup
+directories it created on the hosts.
 
 ## Configuration
 

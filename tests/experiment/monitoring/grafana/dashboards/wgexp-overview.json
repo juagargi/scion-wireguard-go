@@ -1708,6 +1708,222 @@
       ],
       "title": "BR Kernel Receive Overflows Per Socket",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "id": 19,
+      "panels": [],
+      "title": "Network vs Border-Router Packet Loss",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Packets lost per minute in the network between two border routers, per link and direction: packets the sending router wrote to its external interface (router_output_pkts_total) minus packets the neighbor router read from its interface towards the sender (router_input_pkts_total). The two ends of a link are paired by the routers' isd_as and neighbor_isd_as labels (one scraped link per AS pair). Only minutes with at least 30 lost packets are drawn: below that the two routers' counters, scraped about a second apart, disagree by up to about 20 packets per minute without any loss. Expect a few false values when traffic starts or stops. A loss here happened between the two routers' sockets: in the wire, switches, VLAN, network cards, or a VM's virtual network card, not in either router. It includes outages (BFD then takes the link down) and partial loss that BFD does not notice, and also packets the network refused, such as frames above the path MTU. A minute in which either router's scrape failed is left blank, because a missing sample looks like a large loss; the panel on the right marks those minutes.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "decimals": 0,
+          "unit": "suffix: packet/min"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 81
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "range": true,
+          "refId": "A",
+          "expr": "(( sum by (isd_as, neighbor_isd_as, interface) ( increase(router_output_pkts_total{display!=\"false\",interface=~\"[0-9]+\"}[1m]) and on (as, br) (min_over_time(up{job=\"scion-border-routers\",display!=\"false\"}[1m]) == 1) ) ) - on (isd_as, neighbor_isd_as) group_left (rx_interface) ( sum by (isd_as, neighbor_isd_as, rx_interface) ( label_replace(label_replace(label_replace(label_replace( increase(router_input_pkts_total{display!=\"false\",interface=~\"[0-9]+\"}[1m]) and on (as, br) (min_over_time(up{job=\"scion-border-routers\",display!=\"false\"}[1m]) == 1), \"rx_interface\", \"$1\", \"interface\", \"(.*)\"), \"swap\", \"$1\", \"isd_as\", \"(.*)\"), \"isd_as\", \"$1\", \"neighbor_isd_as\", \"(.*)\"), \"neighbor_isd_as\", \"$1\", \"swap\", \"(.*)\") ) )) >= 30",
+          "legendFormat": "{{isd_as}}#{{interface}} -> {{neighbor_isd_as}}#{{rx_interface}}"
+        }
+      ],
+      "title": "Network Packet Loss Between Border Routers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Puts each priority drop next to what the network and BFD did in the same minute. Priority drops (left axis, same counter and reasons as Priority Packet Drops Total, split by reason): busy_forwarder = the router's egress queue was full, a router or load problem; egress_down = the router refused the packet because BFD had the egress link down. An egress_down drop comes with BFD state changes on that interface (right axis). If network loss (left axis, all links, minutes with at least 30 lost packets) is high in the same minute, the network stopped delivering packets and BFD reacted to that. If the minute is marked 'network loss unknown', a router scrape failed and the network loss could not be measured: look at the BFD panels or at captures. egress_down with BFD changes, a measured minute and no network loss would point at the routers. Not every BFD change brings priority drops: a link that carries no priority traffic (best effort only) drops no priority packets while it is down, and BFD packets themselves are still sent while the session is down.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "decimals": 0,
+          "unit": "suffix: packet/min"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 7
+              },
+              {
+                "id": "unit",
+                "value": "suffix: changes/min"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "D"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 7
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "text",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "suffix: failed scrapes/min"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 81
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "range": true,
+          "refId": "A",
+          "expr": "sum by (reason) (increase(router_dropped_priority_pkts_total{display!=\"false\",reason=~\"busy_forwarder|egress_down\"}[1m])) > 0",
+          "legendFormat": "priority drops: {{reason}}"
+        },
+        {
+          "editorMode": "code",
+          "range": true,
+          "refId": "B",
+          "expr": "sum((( sum by (isd_as, neighbor_isd_as, interface) ( increase(router_output_pkts_total{display!=\"false\",interface=~\"[0-9]+\"}[1m]) and on (as, br) (min_over_time(up{job=\"scion-border-routers\",display!=\"false\"}[1m]) == 1) ) ) - on (isd_as, neighbor_isd_as) group_left (rx_interface) ( sum by (isd_as, neighbor_isd_as, rx_interface) ( label_replace(label_replace(label_replace(label_replace( increase(router_input_pkts_total{display!=\"false\",interface=~\"[0-9]+\"}[1m]) and on (as, br) (min_over_time(up{job=\"scion-border-routers\",display!=\"false\"}[1m]) == 1), \"rx_interface\", \"$1\", \"interface\", \"(.*)\"), \"swap\", \"$1\", \"isd_as\", \"(.*)\"), \"isd_as\", \"$1\", \"neighbor_isd_as\", \"(.*)\"), \"neighbor_isd_as\", \"$1\", \"swap\", \"(.*)\") ) )) >= 30)",
+          "legendFormat": "network loss, all links"
+        },
+        {
+          "editorMode": "code",
+          "range": true,
+          "refId": "C",
+          "expr": "sum by (as, interface) (increase(router_bfd_state_changes_total{display!=\"false\"}[1m])) > 0",
+          "legendFormat": "BFD state changes {{as}} #{{interface}}"
+        },
+        {
+          "editorMode": "code",
+          "range": true,
+          "refId": "D",
+          "expr": "sum(count_over_time(up{job=\"scion-border-routers\",display!=\"false\"}[1m]) - sum_over_time(up{job=\"scion-border-routers\",display!=\"false\"}[1m])) > 0",
+          "legendFormat": "network loss unknown (router scrape failed)"
+        }
+      ],
+      "title": "Priority Drops vs Network Loss and BFD",
+      "type": "timeseries"
     }
   ]
 }

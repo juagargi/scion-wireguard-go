@@ -710,7 +710,7 @@ class SSHFlow(unittest.TestCase):
         self.assertEqual(inv.hosts["rnp"].alias, "sciera-rnp")
         self.assertEqual(inv.marketplace.host, "ufms")
         self.assertTrue(inv.marketplace.location_override)
-        self.assertEqual(len(inv.routers), 3)
+        self.assertEqual(len(inv.routers), 6)  # br-2 and br-1 on each host
         self.assertEqual(len(inv.shaping), 4)
         self.assertEqual(i.stack.remote_prometheus_port, 8091)
         # the experiment's own config is not modified to build it
@@ -727,6 +727,9 @@ class SSHFlow(unittest.TestCase):
             ("rnp", "127.0.0.1:38401", 19195, "targets/border_routers.json"),
             ("ufes", "127.0.0.1:38401", 19196, "targets/border_routers.json"),
             ("ufms", "127.0.0.1:38401", 19197, "targets/border_routers.json"),
+            ("rnp", "127.0.0.1:30401", 19198, "targets/border_routers.json"),
+            ("ufes", "127.0.0.1:30401", 19199, "targets/border_routers.json"),
+            ("ufms", "127.0.0.1:30401", 19200, "targets/border_routers.json"),
         ])
         self.assertEqual(sources[0].labels["node"], "rnp")
         self.assertEqual(sources[3].labels, {
@@ -734,6 +737,8 @@ class SSHFlow(unittest.TestCase):
             "class": "best_effort", "tunnel_class": "best_effort", "isd_as": "71-2:0:5c",
             "node": "ufms"})
         self.assertEqual(sources[5].labels, {"as": "71_1916", "br": "br-2"})
+        # br-1 is scraped but hidden (display false)
+        self.assertEqual(sources[8].labels, {"as": "71_1916", "br": "br-1", "display": "false"})
 
     def test_target_documents(self):
         docs = {k: json.loads(v) for k, v in self.make().target_documents().items()}
@@ -745,13 +750,14 @@ class SSHFlow(unittest.TestCase):
         self.assertEqual(docs["targets/runner.json"],
                          [{"targets": ["127.0.0.1:19194"], "labels": {"experiment": sciera_experiment().name}}])
         self.assertEqual([t["targets"] for t in docs["targets/border_routers.json"]],
-                         [["127.0.0.1:38401"]])
+                         [["127.0.0.1:38401"], ["127.0.0.1:30401"]])
 
     def test_agents(self):
         i = self.make()
         agents = i.agents()
         self.assertEqual([(a.host, a.write_port, [s.port for s in a.sources]) for a in agents],
-                         [("rnp", 19190, [19190, 19195]), ("ufes", 19192, [19192, 19196])])
+                         [("rnp", 19190, [19190, 19195, 19198]),
+                          ("ufes", 19192, [19192, 19196, 19199])])
         specs = self.hb.ssh_setup.agent_tunnel_specs(i.inventory, agents, 8091)
         self.assertEqual([(s.source_alias, s.prometheus_alias, s.port, s.source_address)
                           for s in specs], [
@@ -782,6 +788,8 @@ class SSHFlow(unittest.TestCase):
             (None, "sciera-ufms", 19194, "127.0.0.1:9189"),
             ("sciera-rnp", "sciera-ufms", 19195, "127.0.0.1:38401"),
             ("sciera-ufes", "sciera-ufms", 19196, "127.0.0.1:38401"),
+            ("sciera-rnp", "sciera-ufms", 19198, "127.0.0.1:30401"),
+            ("sciera-ufes", "sciera-ufms", 19199, "127.0.0.1:30401"),
         ])
 
     def test_paths_and_sciond(self):

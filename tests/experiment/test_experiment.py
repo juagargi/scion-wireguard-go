@@ -489,6 +489,35 @@ class DashboardContractTest(unittest.TestCase):
         if labels:
             self.assertGreater(checked, 5)
 
+    def test_router_queries_leave_out_hidden_routers(self):
+        """A router with display false is labeled display="false"; no panel or results.json
+        figure may count it (the same rule as hummbwtester's dashboard)."""
+        import re
+        dashboard = json.loads(
+            (HERE / "monitoring" / "grafana" / "dashboards" / "wgexp-overview.json").read_text())
+        import results
+        exprs: list[str] = list(results.PROMETHEUS_QUERIES.values())
+
+        def collect(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "expr" and isinstance(item, str):
+                        exprs.append(item)
+                    else:
+                        collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(dashboard)
+        selectors = [(expr, m.group(0)) for expr in exprs
+                     for m in re.finditer(r'\b(?:router_\w+|up(?=\{+job="scion-border-routers"))'
+                                          r'(?:\{+[^}]*\}+)?', expr)]
+        self.assertGreater(len(selectors), 20)
+        for expr, selector in selectors:
+            with self.subTest(expr=expr):
+                self.assertIn('display!="false"', selector)
+
 
 if __name__ == "__main__":
     unittest.main()

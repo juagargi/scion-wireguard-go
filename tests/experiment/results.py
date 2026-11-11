@@ -112,16 +112,17 @@ def parse_sender_log(text: str, endpoint: str = "") -> SenderStats:
 
 
 # name -> PromQL template; {w} is the run window in seconds. Evaluated at the end of the run.
+# Routers with display false (labeled display="false") are left out, as on the dashboard.
 PROMETHEUS_QUERIES = {
-    "demoted_freshness": "sum(increase(router_humm_demoted_freshness_total[{w}s])) or on() vector(0)",
-    "demoted_expired": "sum(increase(router_humm_demoted_expired_total[{w}s])) or on() vector(0)",
-    "demoted_tokenbucket": "sum(increase(router_humm_demoted_tokenbucket_total[{w}s])) or on() vector(0)",
+    "demoted_freshness": 'sum(increase(router_humm_demoted_freshness_total{{display!="false"}}[{w}s])) or on() vector(0)',
+    "demoted_expired": 'sum(increase(router_humm_demoted_expired_total{{display!="false"}}[{w}s])) or on() vector(0)',
+    "demoted_tokenbucket": 'sum(increase(router_humm_demoted_tokenbucket_total{{display!="false"}}[{w}s])) or on() vector(0)',
     # Priority drops for either reason; the two below single out a downed egress interface
     # (BFD down), for priority traffic and for all traffic.
-    "priority_drops": 'sum(increase(router_dropped_priority_pkts_total{{reason=~"busy_forwarder|egress_down"}}[{w}s])) or on() vector(0)',
-    "priority_drops_egress_down": 'sum(increase(router_dropped_priority_pkts_total{{reason="egress_down"}}[{w}s])) or on() vector(0)',
-    "drops_egress_down": 'sum(increase(router_dropped_pkts_total{{reason="egress_down"}}[{w}s])) or on() vector(0)',
-    "receive_overflows": "sum(increase(router_underlay_receive_overflow_pkts_total[{w}s])) or on() vector(0)",
+    "priority_drops": 'sum(increase(router_dropped_priority_pkts_total{{display!="false", reason=~"busy_forwarder|egress_down"}}[{w}s])) or on() vector(0)',
+    "priority_drops_egress_down": 'sum(increase(router_dropped_priority_pkts_total{{display!="false", reason="egress_down"}}[{w}s])) or on() vector(0)',
+    "drops_egress_down": 'sum(increase(router_dropped_pkts_total{{display!="false", reason="egress_down"}}[{w}s])) or on() vector(0)',
+    "receive_overflows": 'sum(increase(router_underlay_receive_overflow_pkts_total{{display!="false"}}[{w}s])) or on() vector(0)',
 }
 
 

@@ -88,6 +88,9 @@ to deliver the run's last samples. `teardown` removes the qdiscs, stops Grafana,
 they send their backlog), the tunnels, Prometheus **and the marketplace**, and removes the setup
 directories it created on the hosts.
 
+A router in `deployment.metrics.routers` with `"display": false` is scraped and stored with the label
+`display="false"`. The dashboard and the Prometheus figures in `results.json` leave it out.
+
 ## Configuration
 
 The format is [`experiment.schema.json`](experiment.schema.json) (JSON Schema, with descriptions for

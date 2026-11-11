@@ -407,6 +407,16 @@ class TestSchema(unittest.TestCase):
         self.assertTrue(self.valid(example(DOCKER)))
         self.assertTrue(self.valid(example(SCIERA)))
 
+    def test_router_display(self):
+        def router(**fields):
+            raw = example(SCIERA)
+            raw["deployment"]["metrics"]["routers"][0].update(fields)
+            return self.valid(raw)
+        self.assertTrue(router(display=False))
+        self.assertTrue(router(display=True))
+        self.assertFalse(router(display="false"))
+        self.assertFalse(router(labels={"display": "false"}))
+
     def test_shape_errors_rejected(self):
         def bad(mutate, base=DOCKER):
             raw = example(base)

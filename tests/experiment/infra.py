@@ -9,7 +9,8 @@ The integrator (experiment.py) uses one object, created once per command::
     infra = Infra.for_experiment(experiment, scion_dir, dry_run=args.dry_run)   # Docker or SSH
 
     # setup, in this order
-    failures  = infra.setup_infrastructure()   # Docker: BR configs, compose, scion.sh start, qdiscs
+    failures  = infra.check_clocks()           # SSH: NTP-synchronized and within 0.25 s (also at run)
+    failures += infra.setup_infrastructure()   # Docker: BR configs, compose, scion.sh start, qdiscs
                                                # SSH: marketplace service, selective qdiscs, Notes
     problems  = infra.preflight()              # tools, /dev/net/tun, sudo, ports, routes, disk
     binaries  = infra.install_binary(path)     # {host_key: on-host wireguard-go path}
@@ -124,7 +125,9 @@ SSH_REQUIRED_MODULES = ("bcrypt",)
 # The MonitoringStack of the SSH deployment, written once (see wgexp_stack()).
 WGEXP_STACK_FIELDS: dict[str, Any] = {
     "prometheus_config": MONITORING_DIR / "prometheus.yml",
-    "remote_dir": "/tmp/wgexp/prometheus",
+    # Not in /tmp, which a reboot empties: the container would then not start until the next
+    # setup. Not under a host's run_dir either, which is created with mode 700.
+    "remote_dir": "/var/tmp/wgexp-prometheus",
     "prometheus_container": PROMETHEUS_CONTAINER,
     "prometheus_project": "wgexp-ssh",
     "remote_prometheus_port": 8091,
@@ -504,6 +507,11 @@ class Infra:
     def setup_infrastructure(self) -> list[str]:
         raise NotImplementedError
 
+    def check_clocks(self) -> list[str]:
+        """Require synchronized clocks on the controller and every host; raise InfraError if not
+        (dry-run: print and return the problem). Docker shares the controller's clock."""
+        return []
+
     def setup_monitoring(self) -> list[str]:
         raise NotImplementedError
 
@@ -512,6 +520,17 @@ class Infra:
 
     def install_jwt(self) -> Optional[dict[str, str]]:
         raise NotImplementedError
+
+    def _export_marketplace_password(self) -> None:
+        """Set the password variable (password_env) to its default if it is unset or empty.
+
+        hummbwtester's get_jwt.py reads the password from that variable, never from argv.
+        """
+        from config import check_environment
+        mp = self.experiment.marketplace
+        password = check_environment(self.experiment)
+        if mp is not None and password and not os.environ.get(mp.password_env):
+            os.environ[mp.password_env] = password
 
     def teardown_infrastructure(self) -> list[str]:
         raise NotImplementedError
@@ -710,7 +729,6 @@ class DockerInfra(Infra):
         o.run(o.dc_args("exec", "-T", service, "test", "-x", DOCKER_BINARY), cwd=o.ROOT)
 
     def install_jwt(self) -> Optional[dict[str, str]]:
-        from config import ConfigError, check_environment
         paths = self.jwt_paths()
         if paths is None:
             return None
@@ -719,16 +737,7 @@ class DockerInfra(Infra):
             self._plan("obtain the marketplace JWT and install it (mode 600) at "
                        f"{DOCKER_JWT} in {', '.join(self._service(k) for k in sorted(paths))}")
             return paths
-        mp = exp.marketplace
-        assert mp is not None
-        try:
-            password = check_environment(exp)
-        except ConfigError as err:
-            raise InfraError(str(err)) from err
-        if password:
-            # the generated topology's account has a fixed development password; the variable is
-            # read by hummbwtester's get_jwt.py, never passed in argv
-            os.environ.setdefault(mp.password_env, password)
+        self._export_marketplace_password()
         cfg = o.parse_marketplace_config(dict(exp.raw["hummingbird"]["marketplace"]), "docker")
         try:
             url = cfg.url if cfg.location_override else o.marketplace_registration_website()
@@ -1024,6 +1033,18 @@ class SSHInfra(Infra):
                 ss.print_manual_steps("setup", manual, self.dry_run)
         return failures
 
+    def check_clocks(self) -> list[str]:
+        # The analysis compares counters and timestamps across hosts.
+        inv = self.inventory
+        try:
+            self.remote.check_clocks([inv.hosts[name] for name in sorted(inv.hosts)])
+        except _RECOVERABLE as err:
+            if not self.dry_run:
+                raise InfraError(str(err)) from err
+            self._say(f"dry-run: clocks: {err}")
+            return [f"clocks: {err}"]
+        return []
+
     def _preflight_hosts(self) -> list[str]:
         inv = self.inventory
         problems: list[str] = []
@@ -1132,6 +1153,7 @@ class SSHInfra(Infra):
         try:
             # Logging in only reads the marketplace, so a dry run does it too (as hummbwtester).
             # Before the first setup the marketplace is not running yet: a dry run only notes that.
+            self._export_marketplace_password()
             try:
                 token = self.ss.obtain_marketplace_jwt(self.inventory)
             except _RECOVERABLE as err:

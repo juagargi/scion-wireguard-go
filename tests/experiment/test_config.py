@@ -135,10 +135,8 @@ class TestExamples(Base):
         self.assertEqual(config.check_environment(d, {}), "1234")
         self.assertEqual(config.check_environment(d, {"WGEXP_MARKETPLACE_PASSWORD": "pw"}), "pw")
         self.assertEqual(config.check_environment(s, {"WGEXP_MARKETPLACE_PASSWORD": "pw"}), "pw")
-        with self.assertRaises(ConfigError) as cm:
-            config.check_environment(s, {})
-        self.assertIn("hummingbird.marketplace.password_env", str(cm.exception))
-        self.assertIn("WGEXP_MARKETPLACE_PASSWORD", str(cm.exception))
+        self.assertEqual(config.check_environment(s, {}), "1234")
+        self.assertEqual(config.check_environment(s, {"WGEXP_MARKETPLACE_PASSWORD": ""}), "1234")
 
     def test_defaults(self):
         def m(r):

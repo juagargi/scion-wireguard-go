@@ -154,7 +154,7 @@ class Pure(unittest.TestCase):
         self.assertEqual((f["remote_dir"], f["prometheus_container"], f["prometheus_project"],
                           f["remote_prometheus_port"], f["config_hash_label"],
                           f["grafana_container"], f["grafana_project"], f["tunnel_state_dir"]),
-                         ("/tmp/wgexp/prometheus", "wgexp-prometheus", "wgexp-ssh", 8091,
+                         ("/var/tmp/wgexp-prometheus", "wgexp-prometheus", "wgexp-ssh", 8091,
                           "org.scion.wgexp.config-sha256", "wgexp-grafana", "wgexp-monitoring",
                           Path("/tmp/wgexp/ssh-tunnels")))
         self.assertEqual(f["prometheus_config"], HERE / "monitoring" / "prometheus.yml")
@@ -352,6 +352,7 @@ class ReuseAPI(unittest.TestCase):
             (ss, "target_documents_for", ["inventory", "sources", "target_files"]),
             (ss, "tunnel_specs_for", ["inventory", "sources"]),
             (ss, "prometheus_forward", ["inventory"]),
+            (remote, "check_clocks", ["hosts"]),
         ]
         for module, name, parameters in functions:
             with self.subTest(function=f"{module.__name__}.{name}"):
@@ -663,6 +664,14 @@ class SSHFlow(unittest.TestCase):
         patcher = mock.patch.object(infra, "SSH_REQUIRED_MODULES", ())
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The inventory names the real SCIERA hosts: whatever a test does not mock itself must
+        # fail instead of reaching them (an unmocked step once started containers there).
+        for name in ("ssh_command", "scp_to", "check_clocks", "_ssh_argv"):
+            def refuse(*args, _name=name, **kwargs):
+                raise AssertionError(f"test reached a real host through remote.{_name}")
+            guard = mock.patch.object(self.hb.remote, name, refuse)
+            guard.start()
+            self.addCleanup(guard.stop)
 
     def make(self, dry_run=False, **kwargs):
         # Never a real SSHHost: a test must not reach the SCIERA hosts. Commands go to FakeHosts
@@ -867,6 +876,38 @@ class SSHFlow(unittest.TestCase):
         self.assertEqual(jwt[0][5], 0o600)  # the controller's copy is private
         self.assertEqual(paths, {"rnp": "/var/tmp/wgexp/setup/marketplace.jwt"})
 
+    def test_jwt_password_defaults_to_1234(self):
+        seen = []
+        i = self.make()
+        with mock.patch.dict(os.environ, clear=False) as env, \
+                mock.patch.object(self.hb.ssh_setup, "copy_if_changed", lambda *a: True), \
+                mock.patch.object(self.hb.ssh_setup, "obtain_marketplace_jwt",
+                                  lambda inv: seen.append(os.environ.get("WGEXP_MARKETPLACE_PASSWORD"))
+                                  or "TOKEN"), \
+                mock.patch("builtins.print"):
+            env.pop("WGEXP_MARKETPLACE_PASSWORD", None)
+            i.install_jwt()
+            env["WGEXP_MARKETPLACE_PASSWORD"] = "secret"
+            i.install_jwt()
+        self.assertEqual(seen, ["1234", "secret"])
+
+    def test_check_clocks(self):
+        remote, checked = self.hb.remote, []
+        i = self.make()
+        with mock.patch.object(remote, "check_clocks", lambda hosts: checked.append(
+                [h.name for h in hosts])):
+            self.assertEqual(i.check_clocks(), [])
+        self.assertEqual(checked, [["rnp", "ufes", "ufms"]])
+        error = remote.SSHError("clocks are not synchronized: ufes: clock is +7.300 s off")
+        with mock.patch.object(remote, "check_clocks", side_effect=error):
+            with self.assertRaises(infra.InfraError) as cm:
+                i.check_clocks()
+            self.assertIn("+7.300 s", str(cm.exception))
+            with mock.patch("builtins.print"):
+                problems = self.make(dry_run=True).check_clocks()
+        self.assertEqual(len(problems), 1)
+        self.assertIn("+7.300 s", problems[0])
+
     def test_binary_gets_net_admin_and_is_checked(self):
         ss = self.hb.ssh_setup
         binary = Path(self.tmp.name) / "wg"
@@ -1004,7 +1045,7 @@ class SSHFlow(unittest.TestCase):
         stacks = [c[1] for c in calls if c[0] in ("prometheus", "tunnels")]
         self.assertTrue(all(s is i.stack for s in stacks))
         rms = [c for c in calls if c[0] == "rm"]
-        self.assertIn(("rm", "ufms", "rm -rf /tmp/wgexp/prometheus"), rms)
+        self.assertIn(("rm", "ufms", "rm -rf /var/tmp/wgexp-prometheus"), rms)
         self.assertEqual(sorted(c[1] for c in rms if "setup" in c[2]), ["rnp", "ufes", "ufms"])
 
 

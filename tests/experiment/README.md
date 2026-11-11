@@ -25,7 +25,8 @@ Commands, all with `--config FILE` and `--scion-dir DIR` (default `$SCION_DIR`):
   Its Python imports need **PyYAML**, and **bcrypt** for SSH deployments.
 - `jsonschema` is optional: when importable, the unit tests also validate the examples against the schema.
 - `WGEXP_MARKETPLACE_PASSWORD` (the `password_env` of the config): the marketplace password.
-  Docker defaults to the generated topology's `1234`. On SSH it is required. It is read from the environment, never from JSON.
+  Unset, it defaults to `1234`, the development password of the generated topology's accounts and of the
+  deployed SCIERA marketplace's users. It is read from the environment, never from JSON.
 - Tools on every tester (container or host): `ip`, `rsync`, `iperf3`, `ping`, `sha256sum` (SSH also `nc`),
   `/dev/net/tun`, and root (Docker) or passwordless `sudo -n` (SSH). `setup` checks these.
 
@@ -74,9 +75,11 @@ Docker deployment:
 purpose, so dashboards and history survive), nor the running SCION topology (it is not stopped).
 `./scion.sh topology` regenerates the first two.
 
-SSH deployment: `setup` also deploys and configures the marketplace on its host, applies selective
-qdiscs on the hosts, may need a manual step for the static-info Note (it prints it), copies the binary
-to each host, starts Prometheus on the monitoring host plus metric relays (SSH tunnels) and a local
+SSH deployment: `setup` first checks that the controller's and every host's clocks are NTP-synchronized
+and within 0.25 s of each other (`run` checks this again). It also deploys and configures the marketplace on its host,
+applies selective qdiscs on the hosts, may need a manual step for the static-info Note (it prints it),
+copies the binary to each host, starts Prometheus on the monitoring host (files in
+`/var/tmp/wgexp-prometheus`, so they survive a reboot) plus metric relays (SSH tunnels) and a local
 Grafana. `teardown` removes the qdiscs, stops Grafana, Prometheus, the relays **and the marketplace**,
 and removes the setup directories it created on the hosts.
 

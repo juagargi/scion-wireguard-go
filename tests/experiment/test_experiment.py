@@ -68,6 +68,9 @@ class FakeInfra:
             return [f"{name} broke"]
         return []
 
+    def check_clocks(self):
+        return self.step("clocks")
+
     def setup_infrastructure(self):
         return self.step("infrastructure")
 
@@ -372,7 +375,7 @@ class CliTest(unittest.TestCase):
         lines = out.splitlines()
         self.assertEqual(lines[0], self.exp.informative[0])
         self.assertEqual(lines[-1], "setup: done.")
-        self.assertEqual(self.infra.calls[:2], ["infrastructure", "preflight"])
+        self.assertEqual(self.infra.calls[:3], ["clocks", "infrastructure", "preflight"])
         self.assertEqual(self.infra.calls[-2:], ["jwt", "monitoring"])
         self.assertEqual(self.builds, [False])
 

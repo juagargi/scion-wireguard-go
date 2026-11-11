@@ -124,6 +124,7 @@ def cmd_setup(experiment: Experiment, scion_dir: Path, *, dry_run: bool = False,
             f"{len(experiment.tunnels)} tunnels, {len(experiment.workloads)} workloads)")
         binary = builder(dry_run)
         infra = infra_factory(experiment, scion_dir, dry_run)
+        failures += infra.check_clocks()
         failures += infra.setup_infrastructure()
         failures += infra.preflight()
         infra.install_binary(binary)
@@ -517,6 +518,7 @@ class Run:
         say(f"run {self.run_id}")
         result: Optional[results_mod.RunResult] = None
         try:
+            self.infra.check_clocks()
             self.hosts = dict(self.infra.hosts())
             if self.experiment.kind == "docker":  # file_sd picks the change up; SSH keeps its own
                 self.infra.write_targets()

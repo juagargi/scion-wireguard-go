@@ -14,8 +14,9 @@ Commands, all with `--config FILE` and `--scion-dir DIR` (default `$SCION_DIR`):
   marketplace, JWT, binary and monitoring. `--dry-run` changes nothing and lists every step.
   Prints the config's `informative` lines first and ends with `setup: done.` or `setup: FAILED.`
 - `run`: starts from a clean slate, brings the tunnels up, runs the workloads, collects logs, writes
-  `results.json`, and cleans up what it created (also on Ctrl-C). Exit status 0 if and only if every
-  primary workload passed, including its verification.
+  `results.json`, and cleans up what it created (also on Ctrl-C or `SIGTERM`; further interrupts
+  are ignored until that cleanup is done). Exit status 0 if and only if every primary workload
+  passed, including its verification.
 - `teardown`: reverses setup, continues past failures and reports them at the end.
 
 ## Requirements
@@ -25,7 +26,8 @@ Commands, all with `--config FILE` and `--scion-dir DIR` (default `$SCION_DIR`):
   Its Python imports need **PyYAML**, and **bcrypt** for SSH deployments.
 - `jsonschema` is optional: when importable, the unit tests also validate the examples against the schema.
 - `WGEXP_MARKETPLACE_PASSWORD` (the `password_env` of the config): the marketplace password.
-  Docker defaults to the generated topology's `1234`. On SSH it is required. It is read from the environment, never from JSON.
+  Unset, it defaults to `1234`, the development password of the generated topology's accounts and of the
+  deployed SCIERA marketplace's users. It is read from the environment, never from JSON.
 - Tools on every tester (container or host): `ip`, `rsync`, `iperf3`, `ping`, `sha256sum` (SSH also `nc`),
   `/dev/net/tun`, and root (Docker) or passwordless `sudo -n` (SSH). `setup` checks these.
 
@@ -74,11 +76,21 @@ Docker deployment:
 purpose, so dashboards and history survive), nor the running SCION topology (it is not stopped).
 `./scion.sh topology` regenerates the first two.
 
-SSH deployment: `setup` also deploys and configures the marketplace on its host, applies selective
-qdiscs on the hosts, may need a manual step for the static-info Note (it prints it), copies the binary
-to each host, starts Prometheus on the monitoring host plus metric relays (SSH tunnels) and a local
-Grafana. `teardown` removes the qdiscs, stops Grafana, Prometheus, the relays **and the marketplace**,
-and removes the setup directories it created on the hosts.
+SSH deployment: `setup` first checks that the controller's and every host's clocks are NTP-synchronized
+and within 0.25 s of each other (`run` checks this again). It also deploys and configures the marketplace on its host,
+applies selective qdiscs on the hosts, may need a manual step for the static-info Note (it prints it),
+copies the binary to each host, starts Prometheus on the monitoring host (files in
+`/var/tmp/wgexp-prometheus`, so they survive a reboot), and starts a local Grafana.
+Every other host with metric sources (wireguard-go endpoints, border routers) runs a Prometheus agent
+(`wgexp-prometheus-agent`). The agent scrapes locally and remote-writes to the central Prometheus
+through an SSH `-R` tunnel, and keeps what it cannot deliver until it can. Only the runner's metrics on
+the controller are still relayed. Before querying Prometheus for `results.json`, `run` waits up to 30 s for the agents
+to deliver the run's last samples. `teardown` removes the qdiscs, stops Grafana, the agents (after
+they send their backlog), the tunnels, Prometheus **and the marketplace**, and removes the setup
+directories it created on the hosts.
+
+A router in `deployment.metrics.routers` with `"display": false` is scraped and stored with the label
+`display="false"`. The dashboard and the Prometheus figures in `results.json` leave it out.
 
 ## Configuration
 
@@ -161,13 +173,19 @@ the marketplace Note, which is why the runner sets `HUMMINGBIRD_MARKETPLACE_ADDR
 make test-experiment
 ```
 
-This runs `python3 -m unittest discover -s tests/experiment -p 'test_*.py'`. The tests mock Docker and SSH.
-Without `$SCION_DIR` and PyYAML the tests that load hummbwtester (`test_infra.py`, compatibility checks)
-are skipped; the schema check needs `jsonschema`. For the full set, with a virtual environment:
+This runs `python3 -m unittest discover -s tests/experiment -p 'test_*.py'` with the Python of `.venv`
+when the repository has one (`.venv/bin/python3`), else `python3`. The tests mock Docker and SSH. They
+load hummbwtester (`experiment.Run` uses its `InterruptGuard`, `infra.py` its setup code) from
+`$SCION_DIR`, which `make` sets to `../scion` unless you pass another checkout. Run directly, without
+`make` and without `$SCION_DIR`, they use the SCION Go module that `go.mod` pins (`go list -m`,
+`tests/experiment/testsupport.py`). They need PyYAML, and they fail, not skip, if hummbwtester cannot
+be loaded. Only the schema check is optional: it is skipped without `jsonschema`. For the full set,
+with a virtual environment in `.venv`, which `make` picks up by itself:
 
 ```bash
-python3 -m venv /tmp/wgexp-venv && /tmp/wgexp-venv/bin/pip install pyyaml bcrypt jsonschema
-SCION_DIR=$SCION PATH=/tmp/wgexp-venv/bin:$PATH make test-experiment
+python3 -m venv .venv && .venv/bin/pip install pyyaml bcrypt jsonschema
+make test-experiment                     # hummbwtester from ../scion
+make test-experiment SCION_DIR=$SCION    # from another checkout
 ```
 
 ## Troubleshooting

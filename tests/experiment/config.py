@@ -57,6 +57,9 @@ _ISD_AS_RE = re.compile(
     r"^[0-9]+-([0-9]+|[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4})$")
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
+# The marketplace password when hummingbird.marketplace.password_env is unset (check_environment).
+DEFAULT_MARKETPLACE_PASSWORD = "1234"
+
 _BANDWIDTH_UNITS = {"k": 10**3, "m": 10**6, "g": 10**9}
 _DURATION_UNITS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
 _SIZE_UNITS = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40}
@@ -834,17 +837,11 @@ def parse_config(raw: Any, path: Path, sha256: str = "") -> Experiment:
 def check_environment(experiment: Experiment, env: Mapping[str, str] = os.environ) -> Optional[str]:
     """Return the marketplace password (None without a marketplace).
 
-    The password is read from the variable named by hummingbird.marketplace.password_env. On
-    Docker, where the generated topology's marketplace account has the password 1234, an unset
-    variable defaults to '1234'. On SSH an unset or empty variable raises ConfigError.
+    The password is read from the variable named by hummingbird.marketplace.password_env. An
+    unset or empty variable defaults to DEFAULT_MARKETPLACE_PASSWORD, the development password
+    of the generated topology's accounts and of the deployed SCIERA marketplace's users.
     """
     mp = experiment.marketplace
     if mp is None:
         return None
-    value = env.get(mp.password_env)
-    if value:
-        return value
-    if experiment.kind == "docker":
-        return "1234"
-    raise ConfigError(f"hummingbird.marketplace.password_env: environment variable "
-                      f"{mp.password_env} is not set")
+    return env.get(mp.password_env) or DEFAULT_MARKETPLACE_PASSWORD

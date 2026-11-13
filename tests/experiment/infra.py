@@ -9,12 +9,14 @@ The integrator (experiment.py) uses one object, created once per command::
     infra = Infra.for_experiment(experiment, scion_dir, dry_run=args.dry_run)   # Docker or SSH
 
     # setup, in this order
-    failures  = infra.setup_infrastructure()   # Docker: BR configs, compose, scion.sh start, qdiscs
+    failures  = infra.check_clocks()           # SSH: NTP-synchronized and within 0.25 s (also at run)
+    failures += infra.setup_infrastructure()   # Docker: BR configs, compose, scion.sh start, qdiscs
                                                # SSH: marketplace service, selective qdiscs, Notes
     problems  = infra.preflight()              # tools, /dev/net/tun, sudo, ports, routes, disk
     binaries  = infra.install_binary(path)     # {host_key: on-host wireguard-go path}
     jwts      = infra.install_jwt()            # {host_key: on-host jwt path} or None
-    failures += infra.setup_monitoring()       # file_sd targets, Prometheus, Grafana, relays
+    failures += infra.setup_monitoring()       # file_sd targets, Prometheus, SSH: agents and
+                                               # tunnels, Grafana
 
     # run (a separate process; nothing from setup needs to be remembered)
     infra.hosts()                  # {host_key: Host}
@@ -22,6 +24,7 @@ The integrator (experiment.py) uses one object, created once per command::
     infra.binary_paths(), infra.jwt_paths(), infra.run_dir(host_key)
     infra.write_targets()          # refresh gen/prometheus/*.json (also done by setup_monitoring)
     infra.grafana_url(start, end), infra.prometheus_url
+    infra.wait_metrics_delivered(end)  # SSH: the agents have sent the samples up to end
 
     # teardown
     errors = infra.teardown_infrastructure()   # list of error strings, empty if everything went well
@@ -42,7 +45,6 @@ from __future__ import annotations
 
 import copy
 import datetime
-import hashlib
 import importlib
 import importlib.util
 import json
@@ -52,8 +54,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,6 +103,8 @@ TARGET_WIREGUARD = "targets/wireguard.json"
 TARGET_RUNNER = "targets/runner.json"
 TARGET_ROUTERS = "targets/border_routers.json"
 TARGET_FILES = (TARGET_WIREGUARD, TARGET_RUNNER, TARGET_ROUTERS)
+# How long a run waits, before querying Prometheus, for the agents to send its last samples.
+AGENT_WAIT_SECONDS = 30
 
 # Tools every endpoint host needs (device set-up, the tunnel ping check); each workload kind adds its
 # own, only on the hosts at either end of it.
@@ -113,8 +115,6 @@ TINY_DISPATCHED_PORTS = (31000, 32767)
 # One copy on each side, rsync's temporary file, and slack: as in tests/scion-end2end.py.
 DISK_SPACE_FACTOR = 2.5
 UNCAPPED_ROUTER_LOG_FACTOR = 3.0
-MONITORING_WAIT_SECONDS = 30
-MONITORING_SETTLE_SECONDS = 2
 SCION_WAIT_SECONDS = 60
 
 # Modules whose absence is reported before the SSH marketplace is set up (the topology
@@ -124,7 +124,9 @@ SSH_REQUIRED_MODULES = ("bcrypt",)
 # The MonitoringStack of the SSH deployment, written once (see wgexp_stack()).
 WGEXP_STACK_FIELDS: dict[str, Any] = {
     "prometheus_config": MONITORING_DIR / "prometheus.yml",
-    "remote_dir": "/tmp/wgexp/prometheus",
+    # Not in /tmp, which a reboot empties: the container would then not start until the next
+    # setup. Not under a host's run_dir either, which is created with mode 700.
+    "remote_dir": "/var/tmp/wgexp-prometheus",
     "prometheus_container": PROMETHEUS_CONTAINER,
     "prometheus_project": "wgexp-ssh",
     "remote_prometheus_port": 8091,
@@ -184,7 +186,43 @@ def load_hummbwtester(scion_dir: Path) -> SimpleNamespace:
         raise InfraError(f"hummbwtester was already imported from {orchestration.ROOT}, "
                          f"not from {root}; one checkout per process")
     _LOADED[key] = SimpleNamespace(orchestration=orchestration, remote=remote, ssh_setup=ssh_setup)
+    warning = older_than_pinned(root)
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr, flush=True)
     return _LOADED[key]
+
+
+def pinned_scion_commit(go_mod: Path = HERE.parent.parent / "go.mod") -> Optional[str]:
+    """The commit of the SCION module that go.mod's replace directive pins, if it names one."""
+    try:
+        text = go_mod.read_text()
+    except OSError:
+        return None
+    match = re.search(r"^replace\s+github\.com/scionproto/scion\s+=>\s+\S+\s+"
+                      r"v\S*-([0-9a-f]{12,40})\s*$", text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def older_than_pinned(scion_dir: Path, commit: Optional[str] = None) -> Optional[str]:
+    """Why the git checkout scion_dir may hold an older hummbwtester than go.mod pins, or None.
+
+    Only a warning: a checkout with local commits on top of the pinned one is normal. Says
+    nothing for a directory that is not a git checkout (such as the Go module cache).
+    """
+    commit = commit or pinned_scion_commit()
+    if commit is None or not (Path(scion_dir) / ".git").exists():
+        return None
+    try:
+        result = subprocess.run(["git", "-C", str(scion_dir), "merge-base", "--is-ancestor",
+                                 commit, "HEAD"], check=False, capture_output=True, text=True)
+    except OSError:
+        return None
+    if result.returncode == 0:
+        return None
+    reason = ("does not contain" if result.returncode == 1
+              else "cannot tell whether it contains (fetch it?)")
+    return (f"the SCION checkout {scion_dir} {reason} commit {commit}, which go.mod pins; "
+            "its hummbwtester may be older than the one wireguard-go is built with")
 
 
 def wgexp_stack(ssh_setup: Any, prometheus_port: Optional[int] = None) -> Any:
@@ -504,8 +542,16 @@ class Infra:
     def setup_infrastructure(self) -> list[str]:
         raise NotImplementedError
 
+    def check_clocks(self) -> list[str]:
+        """Require synchronized clocks on the controller and every host; raise InfraError if not
+        (dry-run: print and return the problem). Docker shares the controller's clock."""
+        return []
+
     def setup_monitoring(self) -> list[str]:
         raise NotImplementedError
+
+    def wait_metrics_delivered(self, end: float) -> None:
+        """Wait until Prometheus has every sample up to end (epoch seconds). Never raises."""
 
     def install_binary(self, binary: Path) -> dict[str, str]:
         raise NotImplementedError
@@ -513,16 +559,19 @@ class Infra:
     def install_jwt(self) -> Optional[dict[str, str]]:
         raise NotImplementedError
 
+    def _export_marketplace_password(self) -> None:
+        """Set the password variable (password_env) to its default if it is unset or empty.
+
+        hummbwtester's get_jwt.py reads the password from that variable, never from argv.
+        """
+        from config import check_environment
+        mp = self.experiment.marketplace
+        password = check_environment(self.experiment)
+        if mp is not None and password and not os.environ.get(mp.password_env):
+            os.environ[mp.password_env] = password
+
     def teardown_infrastructure(self) -> list[str]:
         raise NotImplementedError
-
-    @staticmethod
-    def sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with Path(path).open("rb") as file:
-            for chunk in iter(lambda: file.read(1 << 20), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     def _attempt(self, errors: list[str], label: str, action: Callable[[], Any]) -> None:
         try:
@@ -530,49 +579,6 @@ class Infra:
         except _RECOVERABLE as err:
             errors.append(f"{label}: {err}")
             self._say(f"teardown: {label} failed: {err}")
-
-
-def _http_answers(url: str) -> bool:
-    try:
-        urllib.request.urlopen(url, timeout=3)
-    except urllib.error.HTTPError:
-        return False  # an error status means the service is not (yet) healthy
-    except (urllib.error.URLError, OSError):
-        return False
-    return True
-
-
-def _container_running(container: str) -> bool:
-    result = subprocess.run(["docker", "inspect", "--format", "{{.State.Running}}", container],
-                            check=False, capture_output=True, text=True)
-    return result.returncode == 0 and result.stdout.strip() == "true"
-
-
-def _require_running(container: str) -> None:
-    if _container_running(container):
-        return
-    logs = subprocess.run(["docker", "logs", "--tail", "5", container], check=False,
-                          capture_output=True, text=True)
-    raise InfraError(f"{container} is not running; last log lines:\n{logs.stdout}{logs.stderr}"
-                     .rstrip())
-
-
-def wait_service(container: str, url: str, seconds: int = MONITORING_WAIT_SECONDS,
-                 settle: float = MONITORING_SETTLE_SECONDS) -> None:
-    """Wait until the container runs and answers at url (hummbwtester's _wait_service).
-
-    Another process holding the port would answer too, while the container has already exited
-    on a bind failure; the container is therefore checked again once the url answered and the
-    startup settled.
-    """
-    for _ in range(seconds):
-        _require_running(container)
-        if _http_answers(url):
-            time.sleep(settle)
-            _require_running(container)
-            return
-        time.sleep(1)
-    raise InfraError(f"{container} does not answer at {url} after {seconds}s")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -683,34 +689,23 @@ class DockerInfra(Infra):
     # -- binary and JWT ----------------------------------------------------------------------
 
     def install_binary(self, binary: Path) -> dict[str, str]:
-        o = self.o
-        digest = self.sha256(binary)
         failures = self._steps([(f"binary on {key}", lambda key=key: self._install_binary_on(
-            key, Path(binary), digest)) for key in self.host_keys()])
+            key, Path(binary))) for key in self.host_keys()])
         if failures:
             raise InfraError("; ".join(failures))
         return self.binary_paths()
 
-    def _install_binary_on(self, host_key: str, binary: Path, digest: str) -> None:
-        o = self.o
+    def _install_binary_on(self, host_key: str, binary: Path) -> None:
+        # hummbwtester copies it to DOCKER_BINARY.new and renames it over the old one, so a
+        # running instance keeps its old inode; it skips a binary with the same SHA-256.
         service = self._service(host_key)
-        current = o.run(o.dc_args("exec", "-T", service, "sha256sum", DOCKER_BINARY),
-                        cwd=o.ROOT, check=False, capture_output=True)
-        if current.returncode == 0 and current.stdout.split() and current.stdout.split()[0] == digest:
+        if not self.o.install_docker_binary(service, binary, DOCKER_BINARY, self.dry_run):
             self._say(f"wireguard-go in {service} is current")
             return
-        self._plan(f"copy {binary} to {service}:{DOCKER_BINARY}")
-        if self.dry_run:
-            return
-        staged = DOCKER_BINARY + ".new"
-        o.run(o.dc_args("cp", str(binary), f"{service}:{staged}"), cwd=o.ROOT)
-        # mv replaces the file atomically; a running instance keeps its old inode
-        o.run(o.dc_args("exec", "-T", service, "bash", "-c",
-                        f"chmod 755 {staged} && mv -f {staged} {DOCKER_BINARY}"), cwd=o.ROOT)
-        o.run(o.dc_args("exec", "-T", service, "test", "-x", DOCKER_BINARY), cwd=o.ROOT)
+        self._say(f"{'dry-run: would copy' if self.dry_run else 'copied'} {binary} to "
+                  f"{service}:{DOCKER_BINARY}")
 
     def install_jwt(self) -> Optional[dict[str, str]]:
-        from config import ConfigError, check_environment
         paths = self.jwt_paths()
         if paths is None:
             return None
@@ -719,16 +714,7 @@ class DockerInfra(Infra):
             self._plan("obtain the marketplace JWT and install it (mode 600) at "
                        f"{DOCKER_JWT} in {', '.join(self._service(k) for k in sorted(paths))}")
             return paths
-        mp = exp.marketplace
-        assert mp is not None
-        try:
-            password = check_environment(exp)
-        except ConfigError as err:
-            raise InfraError(str(err)) from err
-        if password:
-            # the generated topology's account has a fixed development password; the variable is
-            # read by hummbwtester's get_jwt.py, never passed in argv
-            os.environ.setdefault(mp.password_env, password)
+        self._export_marketplace_password()
         cfg = o.parse_marketplace_config(dict(exp.raw["hummingbird"]["marketplace"]), "docker")
         try:
             url = cfg.url if cfg.location_override else o.marketplace_registration_website()
@@ -804,12 +790,10 @@ class DockerInfra(Infra):
 
     def _owner_check(self, container: str, service: str) -> bool:
         """Whether the container exists; refuse one that belongs to another Compose project."""
-        owner = self.o.local_container_owner(container)
-        expected = f"{MONITORING_PROJECT}/{service}"
-        if owner is not None and owner != expected:
-            raise InfraError(f"{container} exists but belongs to {owner}, not {expected}; "
-                             "refusing to replace it")
-        return owner is not None
+        try:
+            return self.o.check_local_owner(container, MONITORING_PROJECT, service)
+        except RuntimeError as err:
+            raise InfraError(f"{err}; refusing to replace it") from err
 
     def setup_monitoring(self) -> list[str]:
         o, mon = self.o, self.experiment.monitoring
@@ -843,8 +827,8 @@ class DockerInfra(Infra):
                 self._plan(f"check that {PROMETHEUS_CONTAINER} and {GRAFANA_CONTAINER} keep "
                            f"running and answer at {prometheus} and {grafana}")
                 return
-            wait_service(PROMETHEUS_CONTAINER, prometheus)
-            wait_service(GRAFANA_CONTAINER, grafana)
+            o.wait_service(PROMETHEUS_CONTAINER, prometheus)
+            o.wait_service(GRAFANA_CONTAINER, grafana)
             self._say(f"Prometheus http://127.0.0.1:{mon.prometheus_port} and Grafana "
                       f"http://127.0.0.1:{mon.grafana_port} are running")
 
@@ -1024,6 +1008,19 @@ class SSHInfra(Infra):
                 ss.print_manual_steps("setup", manual, self.dry_run)
         return failures
 
+    def check_clocks(self) -> list[str]:
+        # The agents stamp samples with their host's clock, and the analysis compares
+        # counters and timestamps across hosts.
+        inv = self.inventory
+        try:
+            self.remote.check_clocks([inv.hosts[name] for name in sorted(inv.hosts)])
+        except _RECOVERABLE as err:
+            if not self.dry_run:
+                raise InfraError(str(err)) from err
+            self._say(f"dry-run: clocks: {err}")
+            return [f"clocks: {err}"]
+        return []
+
     def _preflight_hosts(self) -> list[str]:
         inv = self.inventory
         problems: list[str] = []
@@ -1132,6 +1129,7 @@ class SSHInfra(Infra):
         try:
             # Logging in only reads the marketplace, so a dry run does it too (as hummbwtester).
             # Before the first setup the marketplace is not running yet: a dry run only notes that.
+            self._export_marketplace_password()
             try:
                 token = self.ss.obtain_marketplace_jwt(self.inventory)
             except _RECOVERABLE as err:
@@ -1173,12 +1171,26 @@ class SSHInfra(Infra):
         sources.extend(ss.router_metric_sources(inv, base + n + 1))
         return sources
 
+    def agents(self) -> list[Any]:
+        """One Prometheus agent per host with metric sources, except the Prometheus host.
+
+        Each scrapes its host's sources and remote-writes them to the central Prometheus through
+        an -R tunnel, keeping what it cannot deliver until it can. A relayed scrape, instead,
+        is lost whenever it fails or is late.
+        """
+        return self.ss.agent_specs_for(self.inventory, self.metric_sources())
+
+    def central_sources(self) -> list[Any]:
+        """The sources the central Prometheus scrapes: on its host, or relayed from the controller."""
+        return self.ss.central_sources(self.inventory, self.metric_sources())
+
     def target_documents(self) -> dict[str, str]:
-        return self.ss.target_documents_for(self.inventory, self.metric_sources(), TARGET_FILES)
+        return self.ss.target_documents_for(self.inventory, self.central_sources(), TARGET_FILES)
 
     def setup_monitoring(self) -> list[str]:
         ss, inv, stack, mon = self.ss, self.inventory, self.stack, self.experiment.monitoring
         state: dict[str, Any] = {}
+        agents = self.agents()
 
         def targets() -> None:
             state["documents"] = self.target_documents()
@@ -1193,8 +1205,15 @@ class SSHInfra(Infra):
             ss.ensure_prometheus(inv, state["documents"], self.dry_run, stack=stack)
 
         def relays() -> None:
-            specs = ss.tunnel_specs_for(inv, self.metric_sources())
-            ss.ensure_tunnels(specs, ss.prometheus_forward(inv), self.dry_run, stack=stack)
+            forward = ss.prometheus_forward(inv)
+            specs = [*ss.tunnel_specs_for(inv, self.central_sources()),
+                     *ss.agent_tunnel_specs(inv, agents, forward.port)]
+            ss.ensure_tunnels(specs, forward, self.dry_run, stack=stack)
+            if self.dry_run:
+                if agents:
+                    self._plan(f"check that {len(agents)} Prometheus agents deliver")
+                return
+            ss.check_agents_delivering(inv, agents, stack=stack)
 
         def grafana() -> None:
             # ensure_grafana builds its health-check URL from this variable (default 3000)
@@ -1208,9 +1227,36 @@ class SSHInfra(Infra):
         return self._steps([
             ("1. targets", targets),
             ("2. Prometheus", lambda: (need_documents(), prometheus())),
-            ("3. metric relays", relays),
-            ("4. Grafana", grafana),
+            ("3. Prometheus agents", lambda: ss.ensure_agents(inv, agents, self.dry_run,
+                                                              stack=stack)),
+            ("4. metric tunnels", relays),
+            ("5. Grafana", grafana),
         ])
+
+    def wait_metrics_delivered(self, end: float) -> None:
+        """Wait until every agent has sent its samples up to end (at most AGENT_WAIT_SECONDS).
+
+        The central Prometheus scrapes its own sources itself; the agents deliver theirs a
+        moment later, or much later after an outage of their tunnel.
+        """
+        pending = {agent.host: self.inventory.hosts[agent.host] for agent in self.agents()}
+        deadline = time.monotonic() + AGENT_WAIT_SECONDS
+        while pending:
+            for name, host in list(pending.items()):
+                try:
+                    delivery = self.ss.agent_delivery(host, stack=self.stack)
+                except _RECOVERABLE:
+                    delivery = None
+                if delivery is not None and delivery.newest_sent >= end:
+                    del pending[name]
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                self._say(f"warning: the Prometheus agents on {', '.join(sorted(pending))} have "
+                          f"not delivered the run's last samples after {AGENT_WAIT_SECONDS} s; "
+                          "the Prometheus figures may miss them")
+                return
+            time.sleep(1)
 
     # -- teardown ------------------------------------------------------------------------------
 
@@ -1241,9 +1287,12 @@ class SSHInfra(Infra):
         self._attempt(errors, "remove selective qdiscs",
                       lambda: ss.remove_selective_qdiscs(inv, self.experiment.tc))
         self._attempt(errors, "stop Grafana", self._stop_local_grafana)
+        # The agents first: they send their backlog through the tunnels to the central Prometheus.
+        self._attempt(errors, "stop the Prometheus agents",
+                      lambda: ss.stop_agents(inv, self.agents(), stack=stack))
+        self._attempt(errors, "close the metric tunnels", lambda: ss.stop_tunnels(stack=stack))
         self._attempt(errors, "stop Prometheus",
                       lambda: ss.stop_prometheus(inv.hosts[inv.prometheus_host], stack=stack))
-        self._attempt(errors, "close the metric relays", lambda: ss.stop_tunnels(stack=stack))
         self._attempt(errors, "stop the marketplace", lambda: ss.stop_marketplace(inv))
         prometheus_host = inv.hosts[inv.prometheus_host]
         self._attempt(errors, f"remove {stack.remote_dir} on {prometheus_host.name}",

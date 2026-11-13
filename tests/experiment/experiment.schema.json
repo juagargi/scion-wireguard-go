@@ -450,7 +450,16 @@
                 "properties": {
                   "host": {"type": "string"},
                   "address": {"$ref": "#/$defs/host_port"},
-                  "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+                  "labels": {
+                    "type": "object",
+                    "propertyNames": {"not": {"const": "display"}},
+                    "additionalProperties": {"type": "string"}
+                  },
+                  "display": {
+                    "description": "false: scraped and stored, but labeled display=\"false\" and left out of the dashboards.",
+                    "type": "boolean",
+                    "default": true
+                  }
                 }
               }
             }

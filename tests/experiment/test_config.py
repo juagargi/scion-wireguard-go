@@ -1,8 +1,12 @@
-"""Tests for config.py. Standard library only; optional checks need SCION_DIR+PyYAML or jsonschema."""
+"""Tests for config.py.
+
+The hummbwtester compatibility checks load hummbwtester through testsupport (PyYAML and the
+SCION checkout it resolves) and fail without it; the schema checks need jsonschema and are skipped
+without it.
+"""
 
 import copy
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -14,6 +18,7 @@ sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402
 from config import ConfigError, load_config  # noqa: E402
+import testsupport  # noqa: E402
 
 DOCKER = HERE / "experiment-docker.json"
 SCIERA = HERE / "experiment-sciera.json"
@@ -437,30 +442,20 @@ class TestSchema(unittest.TestCase):
             r["hummingbird"]["marketplace"].pop("username"))
 
 
-# hummbwtester compatibility (needs SCION_DIR and PyYAML)
-_SCION_DIR = os.environ.get("SCION_DIR")
-_hummb = None
-_hummb_skip = "SCION_DIR is not set: hummbwtester compatibility checks skipped"
-if _SCION_DIR:
-    try:
-        import yaml  # noqa: F401
-        sys.path.insert(0, _SCION_DIR)
-        from tools.hummbwtester.scripts import orchestration, ssh_orchestration  # type: ignore
-        _hummb = (orchestration, ssh_orchestration)
-    except ImportError as e:
-        _hummb_skip = f"hummbwtester not importable ({e}): compatibility checks skipped"
-
-
-@unittest.skipIf(_hummb is None, _hummb_skip)
+# hummbwtester compatibility (testsupport resolves the checkout; fails, not skips, without it)
 class TestHummbwtesterCompat(unittest.TestCase):
+    def setUp(self):
+        hb = testsupport.hummbwtester()
+        self.hummb = (hb.orchestration, hb.remote)
+
     def test_marketplace_sections(self):
-        orchestration, _ = _hummb
+        orchestration, _ = self.hummb
         for path, kind in ((DOCKER, "docker"), (SCIERA, "ssh")):
             raw = example(path)
             orchestration.parse_marketplace_config(raw["hummingbird"]["marketplace"], kind)
 
     def test_sciera_deployment(self):
-        _, remote = _hummb
+        _, remote = self.hummb
         raw = example(SCIERA)
         e = load_config(SCIERA)
         root = copy.deepcopy(raw)

@@ -14,8 +14,9 @@ Commands, all with `--config FILE` and `--scion-dir DIR` (default `$SCION_DIR`):
   marketplace, JWT, binary and monitoring. `--dry-run` changes nothing and lists every step.
   Prints the config's `informative` lines first and ends with `setup: done.` or `setup: FAILED.`
 - `run`: starts from a clean slate, brings the tunnels up, runs the workloads, collects logs, writes
-  `results.json`, and cleans up what it created (also on Ctrl-C). Exit status 0 if and only if every
-  primary workload passed, including its verification.
+  `results.json`, and cleans up what it created (also on Ctrl-C or `SIGTERM`; further interrupts
+  are ignored until that cleanup is done). Exit status 0 if and only if every primary workload
+  passed, including its verification.
 - `teardown`: reverses setup, continues past failures and reports them at the end.
 
 ## Requirements
@@ -173,12 +174,17 @@ make test-experiment
 ```
 
 This runs `python3 -m unittest discover -s tests/experiment -p 'test_*.py'`. The tests mock Docker and SSH.
-Without `$SCION_DIR` and PyYAML the tests that load hummbwtester (`test_infra.py`, compatibility checks)
-are skipped; the schema check needs `jsonschema`. For the full set, with a virtual environment:
+They load hummbwtester (`experiment.Run` uses its `InterruptGuard`, `infra.py` its setup code) from
+`$SCION_DIR`, or, if it is unset, from the SCION Go module that `go.mod` pins (`go list -m`), so by
+default they test against the hummbwtester version this repository builds with
+(`tests/experiment/testsupport.py`). They need PyYAML, and they fail, not skip, if hummbwtester cannot
+be loaded. Only the schema check is optional: it is skipped without `jsonschema`. For the full set,
+with a virtual environment:
 
 ```bash
 python3 -m venv /tmp/wgexp-venv && /tmp/wgexp-venv/bin/pip install pyyaml bcrypt jsonschema
-SCION_DIR=$SCION PATH=/tmp/wgexp-venv/bin:$PATH make test-experiment
+PATH=/tmp/wgexp-venv/bin:$PATH make test-experiment                # pinned hummbwtester
+SCION_DIR=$SCION PATH=/tmp/wgexp-venv/bin:$PATH make test-experiment  # your checkout
 ```
 
 ## Troubleshooting

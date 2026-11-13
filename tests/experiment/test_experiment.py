@@ -4,6 +4,7 @@ import contextlib
 import dataclasses
 import io
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config  # noqa: E402
 import experiment  # noqa: E402
+import testsupport  # noqa: E402
 import wireguard  # noqa: E402
 import workloads  # noqa: E402
 
@@ -61,6 +63,7 @@ class FakeInfra:
         self.teardown_errors = list(teardown_errors)
         self._hosts = {k: FakeHost(k) for k in sorted({e.host_key for e in experiment_.endpoints})}
         self.prometheus_url = "http://127.0.0.1:1"
+        self.hb = testsupport.hummbwtester()  # Run uses hb.orchestration.InterruptGuard
 
     def step(self, name):
         self.calls.append(name)
@@ -330,6 +333,43 @@ class RunTest(unittest.TestCase):
         self.assertTrue(all(i.stopped for i in FakeInstance.created))
         self.assertTrue(self.servers[0].stopped)
         self.assertIs(signal.getsignal(signal.SIGINT), handler)  # restored after the cleanup
+
+    def test_signals_never_cut_short_the_cleanup(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum.name):
+                FakeInstance.created, self.servers = [], []
+                FakeRunner.behaviour = {"copy-1g": "hang"}
+                calls = []
+
+                def sleep(seconds):
+                    calls.append(seconds)
+                    if len(calls) == 4:
+                        os.kill(os.getpid(), signum)  # While the workloads run.
+                    time.sleep(0.01)
+
+                class SignalledInstance(FakeInstance):
+                    def stop(self):
+                        os.kill(os.getpid(), signum)  # Again while each instance is stopped.
+                        super().stop()
+
+                handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+                exp = quick_experiment()
+                run = experiment.Run(exp, FakeInfra(exp), run_id="rid",
+                                     logs_root=Path(self.tmp.name),
+                                     instance_factory=SignalledInstance,
+                                     runner_factory=FakeRunner,
+                                     server_factory=self.server_factory, poll_interval=0.01,
+                                     sleep=sleep)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = run.execute()
+                results = json.loads(
+                    (Path(self.tmp.name) / "rid" / "results.json").read_text())
+                self.assertEqual(rc, 1)
+                self.assertTrue(results["interrupted"])
+                self.assertTrue(FakeInstance.created)
+                self.assertTrue(all(i.stopped for i in FakeInstance.created))
+                self.assertTrue(self.servers[0].stopped)
+                self.assertEqual({s: signal.getsignal(s) for s in handlers}, handlers)
 
     def test_tunnel_failure_still_writes_results_and_cleans_up(self):
         self.bring_up.side_effect = wireguard.WireguardError("no traffic passed")

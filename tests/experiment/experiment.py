@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -518,29 +517,30 @@ class Run:
         exp = self.experiment
         say(f"run {self.run_id}")
         result: Optional[results_mod.RunResult] = None
-        try:
-            self.infra.check_clocks()
-            self.hosts = dict(self.infra.hosts())
-            if self.experiment.kind == "docker":  # file_sd picks the change up; SSH keeps its own
-                self.infra.write_targets()
-            self.check_binaries()
-            self.clean_slate()
-            self.start_instances()
-            self.bring_up_tunnels()
-            self.start_metrics_server()
-            self.make_runners()
-            self.prepare_runners()
-            self.started = self.clock()
-            self.run_workloads()
-        except KeyboardInterrupt:
-            self.interrupted = True
-            say("interrupted: cleaning up")
-        except Exception as err:  # noqa: BLE001
-            self.errors.append(str(err))
-            say(f"run failed: {err}")
-        finally:
-            previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        with self.infra.hb.orchestration.InterruptGuard() as guard:
             try:
+                with guard.interruptible():
+                    self.infra.check_clocks()
+                    self.hosts = dict(self.infra.hosts())
+                    # file_sd picks the change up; SSH keeps its own.
+                    if self.experiment.kind == "docker":
+                        self.infra.write_targets()
+                    self.check_binaries()
+                    self.clean_slate()
+                    self.start_instances()
+                    self.bring_up_tunnels()
+                    self.start_metrics_server()
+                    self.make_runners()
+                    self.prepare_runners()
+                    self.started = self.clock()
+                    self.run_workloads()
+            except KeyboardInterrupt:
+                self.interrupted = True
+                say("interrupted: cleaning up")
+            except Exception as err:  # noqa: BLE001
+                self.errors.append(str(err))
+                say(f"run failed: {err}")
+            finally:
                 end = self.clock()
                 self.stop_workloads()
                 self.collect_logs()
@@ -550,8 +550,6 @@ class Run:
                 except Exception as err:  # noqa: BLE001
                     say(f"warning: could not write results.json: {err}")
                 self.cleanup()
-            finally:
-                signal.signal(signal.SIGINT, previous)
         if result is None:
             return 1
         say()
@@ -563,14 +561,8 @@ class Run:
 def cmd_run(experiment: Experiment, scion_dir: Path, *,
             infra_factory: Callable[..., Any] = new_infra, **kwargs: Any) -> int:
     infra = infra_factory(experiment, scion_dir, False)
-    def on_sigterm(*_: Any) -> None:
-        raise KeyboardInterrupt
-
-    previous = signal.signal(signal.SIGTERM, on_sigterm)
-    try:
-        return Run(experiment, infra, **kwargs).execute()
-    finally:
-        signal.signal(signal.SIGTERM, previous)
+    # Run.execute turns SIGINT and SIGTERM into an interrupt (hummbwtester's InterruptGuard).
+    return Run(experiment, infra, **kwargs).execute()
 
 
 # ---------------------------------------------------------------------------------------------

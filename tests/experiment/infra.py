@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import copy
 import datetime
-import hashlib
 import importlib
 import importlib.util
 import json
@@ -55,8 +54,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,8 +115,6 @@ TINY_DISPATCHED_PORTS = (31000, 32767)
 # One copy on each side, rsync's temporary file, and slack: as in tests/scion-end2end.py.
 DISK_SPACE_FACTOR = 2.5
 UNCAPPED_ROUTER_LOG_FACTOR = 3.0
-MONITORING_WAIT_SECONDS = 30
-MONITORING_SETTLE_SECONDS = 2
 SCION_WAIT_SECONDS = 60
 
 # Modules whose absence is reported before the SSH marketplace is set up (the topology
@@ -191,7 +186,43 @@ def load_hummbwtester(scion_dir: Path) -> SimpleNamespace:
         raise InfraError(f"hummbwtester was already imported from {orchestration.ROOT}, "
                          f"not from {root}; one checkout per process")
     _LOADED[key] = SimpleNamespace(orchestration=orchestration, remote=remote, ssh_setup=ssh_setup)
+    warning = older_than_pinned(root)
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr, flush=True)
     return _LOADED[key]
+
+
+def pinned_scion_commit(go_mod: Path = HERE.parent.parent / "go.mod") -> Optional[str]:
+    """The commit of the SCION module that go.mod's replace directive pins, if it names one."""
+    try:
+        text = go_mod.read_text()
+    except OSError:
+        return None
+    match = re.search(r"^replace\s+github\.com/scionproto/scion\s+=>\s+\S+\s+"
+                      r"v\S*-([0-9a-f]{12,40})\s*$", text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def older_than_pinned(scion_dir: Path, commit: Optional[str] = None) -> Optional[str]:
+    """Why the git checkout scion_dir may hold an older hummbwtester than go.mod pins, or None.
+
+    Only a warning: a checkout with local commits on top of the pinned one is normal. Says
+    nothing for a directory that is not a git checkout (such as the Go module cache).
+    """
+    commit = commit or pinned_scion_commit()
+    if commit is None or not (Path(scion_dir) / ".git").exists():
+        return None
+    try:
+        result = subprocess.run(["git", "-C", str(scion_dir), "merge-base", "--is-ancestor",
+                                 commit, "HEAD"], check=False, capture_output=True, text=True)
+    except OSError:
+        return None
+    if result.returncode == 0:
+        return None
+    reason = ("does not contain" if result.returncode == 1
+              else "cannot tell whether it contains (fetch it?)")
+    return (f"the SCION checkout {scion_dir} {reason} commit {commit}, which go.mod pins; "
+            "its hummbwtester may be older than the one wireguard-go is built with")
 
 
 def wgexp_stack(ssh_setup: Any, prometheus_port: Optional[int] = None) -> Any:
@@ -542,63 +573,12 @@ class Infra:
     def teardown_infrastructure(self) -> list[str]:
         raise NotImplementedError
 
-    @staticmethod
-    def sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with Path(path).open("rb") as file:
-            for chunk in iter(lambda: file.read(1 << 20), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
     def _attempt(self, errors: list[str], label: str, action: Callable[[], Any]) -> None:
         try:
             action()
         except _RECOVERABLE as err:
             errors.append(f"{label}: {err}")
             self._say(f"teardown: {label} failed: {err}")
-
-
-def _http_answers(url: str) -> bool:
-    try:
-        urllib.request.urlopen(url, timeout=3)
-    except urllib.error.HTTPError:
-        return False  # an error status means the service is not (yet) healthy
-    except (urllib.error.URLError, OSError):
-        return False
-    return True
-
-
-def _container_running(container: str) -> bool:
-    result = subprocess.run(["docker", "inspect", "--format", "{{.State.Running}}", container],
-                            check=False, capture_output=True, text=True)
-    return result.returncode == 0 and result.stdout.strip() == "true"
-
-
-def _require_running(container: str) -> None:
-    if _container_running(container):
-        return
-    logs = subprocess.run(["docker", "logs", "--tail", "5", container], check=False,
-                          capture_output=True, text=True)
-    raise InfraError(f"{container} is not running; last log lines:\n{logs.stdout}{logs.stderr}"
-                     .rstrip())
-
-
-def wait_service(container: str, url: str, seconds: int = MONITORING_WAIT_SECONDS,
-                 settle: float = MONITORING_SETTLE_SECONDS) -> None:
-    """Wait until the container runs and answers at url (hummbwtester's _wait_service).
-
-    Another process holding the port would answer too, while the container has already exited
-    on a bind failure; the container is therefore checked again once the url answered and the
-    startup settled.
-    """
-    for _ in range(seconds):
-        _require_running(container)
-        if _http_answers(url):
-            time.sleep(settle)
-            _require_running(container)
-            return
-        time.sleep(1)
-    raise InfraError(f"{container} does not answer at {url} after {seconds}s")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -709,31 +689,21 @@ class DockerInfra(Infra):
     # -- binary and JWT ----------------------------------------------------------------------
 
     def install_binary(self, binary: Path) -> dict[str, str]:
-        o = self.o
-        digest = self.sha256(binary)
         failures = self._steps([(f"binary on {key}", lambda key=key: self._install_binary_on(
-            key, Path(binary), digest)) for key in self.host_keys()])
+            key, Path(binary))) for key in self.host_keys()])
         if failures:
             raise InfraError("; ".join(failures))
         return self.binary_paths()
 
-    def _install_binary_on(self, host_key: str, binary: Path, digest: str) -> None:
-        o = self.o
+    def _install_binary_on(self, host_key: str, binary: Path) -> None:
+        # hummbwtester copies it to DOCKER_BINARY.new and renames it over the old one, so a
+        # running instance keeps its old inode; it skips a binary with the same SHA-256.
         service = self._service(host_key)
-        current = o.run(o.dc_args("exec", "-T", service, "sha256sum", DOCKER_BINARY),
-                        cwd=o.ROOT, check=False, capture_output=True)
-        if current.returncode == 0 and current.stdout.split() and current.stdout.split()[0] == digest:
+        if not self.o.install_docker_binary(service, binary, DOCKER_BINARY, self.dry_run):
             self._say(f"wireguard-go in {service} is current")
             return
-        self._plan(f"copy {binary} to {service}:{DOCKER_BINARY}")
-        if self.dry_run:
-            return
-        staged = DOCKER_BINARY + ".new"
-        o.run(o.dc_args("cp", str(binary), f"{service}:{staged}"), cwd=o.ROOT)
-        # mv replaces the file atomically; a running instance keeps its old inode
-        o.run(o.dc_args("exec", "-T", service, "bash", "-c",
-                        f"chmod 755 {staged} && mv -f {staged} {DOCKER_BINARY}"), cwd=o.ROOT)
-        o.run(o.dc_args("exec", "-T", service, "test", "-x", DOCKER_BINARY), cwd=o.ROOT)
+        self._say(f"{'dry-run: would copy' if self.dry_run else 'copied'} {binary} to "
+                  f"{service}:{DOCKER_BINARY}")
 
     def install_jwt(self) -> Optional[dict[str, str]]:
         paths = self.jwt_paths()
@@ -820,12 +790,10 @@ class DockerInfra(Infra):
 
     def _owner_check(self, container: str, service: str) -> bool:
         """Whether the container exists; refuse one that belongs to another Compose project."""
-        owner = self.o.local_container_owner(container)
-        expected = f"{MONITORING_PROJECT}/{service}"
-        if owner is not None and owner != expected:
-            raise InfraError(f"{container} exists but belongs to {owner}, not {expected}; "
-                             "refusing to replace it")
-        return owner is not None
+        try:
+            return self.o.check_local_owner(container, MONITORING_PROJECT, service)
+        except RuntimeError as err:
+            raise InfraError(f"{err}; refusing to replace it") from err
 
     def setup_monitoring(self) -> list[str]:
         o, mon = self.o, self.experiment.monitoring
@@ -859,8 +827,8 @@ class DockerInfra(Infra):
                 self._plan(f"check that {PROMETHEUS_CONTAINER} and {GRAFANA_CONTAINER} keep "
                            f"running and answer at {prometheus} and {grafana}")
                 return
-            wait_service(PROMETHEUS_CONTAINER, prometheus)
-            wait_service(GRAFANA_CONTAINER, grafana)
+            o.wait_service(PROMETHEUS_CONTAINER, prometheus)
+            o.wait_service(GRAFANA_CONTAINER, grafana)
             self._say(f"Prometheus http://127.0.0.1:{mon.prometheus_port} and Grafana "
                       f"http://127.0.0.1:{mon.grafana_port} are running")
 

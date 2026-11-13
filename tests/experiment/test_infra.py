@@ -1,12 +1,14 @@
 """Tests for infra.py.
 
-The pure helpers run anywhere. The tests that load hummbwtester need $SCION_DIR (a SCION checkout)
-and PyYAML, and are skipped without them. Nothing here touches Docker or an SSH host: subprocess,
+The pure helpers run anywhere. The tests that load hummbwtester need PyYAML and the SCION checkout
+that testsupport resolves ($SCION_DIR, or the SCION Go module go.mod pins); without them they
+fail, they are not skipped. Nothing here touches Docker or an SSH host: subprocess,
 hummbwtester's step functions and the hosts are mocked.
 """
 
 import dataclasses
 import datetime
+import hashlib
 import inspect
 import json
 import os
@@ -23,28 +25,14 @@ sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402
 import infra  # noqa: E402
+import testsupport  # noqa: E402
 
 DOCKER = HERE / "experiment-docker.json"
 SCIERA = HERE / "experiment-sciera.json"
 
-SCION_DIR = os.environ.get("SCION_DIR")
-try:
-    import yaml  # noqa: F401
-    HAVE_YAML = True
-except ImportError:
-    HAVE_YAML = False
-
-REAL = bool(SCION_DIR) and HAVE_YAML and (Path(SCION_DIR or "/nonexistent") / "tools" / "hummbwtester").is_dir()
-needs_scion = unittest.skipUnless(REAL, "needs $SCION_DIR and PyYAML")
-
-_HB = None
-
 
 def real_hb():
-    global _HB
-    if _HB is None:
-        _HB = infra.load_hummbwtester(Path(SCION_DIR))
-    return _HB
+    return testsupport.hummbwtester()
 
 
 def docker_experiment():
@@ -174,6 +162,34 @@ class Pure(unittest.TestCase):
                 infra.load_hummbwtester(Path(tmp) / "nope")
             self.assertIn("orchestration.py", str(cm.exception))
 
+    def test_pinned_scion_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            go_mod = Path(tmp) / "go.mod"
+            go_mod.write_text("module x\n\nreplace github.com/scionproto/scion => "
+                              "github.com/juagargi/scion v0.14.1-humm.0.0.20261113142716-"
+                              "9af700459fed\n")
+            self.assertEqual(infra.pinned_scion_commit(go_mod), "9af700459fed")
+            go_mod.write_text("module x\n")
+            self.assertIsNone(infra.pinned_scion_commit(go_mod))
+        self.assertRegex(infra.pinned_scion_commit() or "", "^[0-9a-f]{12,40}$")  # our go.mod
+
+    def test_older_than_pinned(self):
+        def git(*args, cwd):
+            return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                                  cwd=cwd, check=True, capture_output=True, text=True).stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            git("init", "-q", cwd=tmp)
+            git("commit", "-q", "--allow-empty", "-m", "old", cwd=tmp)
+            old = git("rev-parse", "HEAD", cwd=tmp).strip()
+            git("commit", "-q", "--allow-empty", "-m", "pinned", cwd=tmp)
+            pinned = git("rev-parse", "HEAD", cwd=tmp).strip()
+            self.assertIsNone(infra.older_than_pinned(Path(tmp), pinned))
+            git("checkout", "-q", old, cwd=tmp)
+            self.assertIn("does not contain", infra.older_than_pinned(Path(tmp), pinned))
+            self.assertIn("cannot tell", infra.older_than_pinned(Path(tmp), "0" * 12))
+        with tempfile.TemporaryDirectory() as tmp:  # not a git checkout: the Go module cache
+            self.assertIsNone(infra.older_than_pinned(Path(tmp), "0" * 12))
+
 
 class DockerTargets(unittest.TestCase):
     """(b) The target documents of the docker example, with a fake hummbwtester."""
@@ -300,7 +316,6 @@ class DockerPreflight(unittest.TestCase):
                       str(cm.exception))
 
 
-@needs_scion
 class ReuseAPI(unittest.TestCase):
     """(a) The names, parameters and fields of hummbwtester that infra.py calls."""
 
@@ -319,6 +334,10 @@ class ReuseAPI(unittest.TestCase):
             (o, "wait_for_scion", ["source_ia", "destination", "timeout"]),
             (o, "parse_marketplace_config", ["marketplace", "kind"]),
             (o, "local_container_owner", ["container"]),
+            (o, "check_local_owner", ["container", "project", "service"]),
+            (o, "wait_service", ["container", "url", "seconds", "settle"]),
+            (o, "install_docker_binary", ["service", "local", "target", "dry_run"]),
+            (o, "InterruptGuard", ["signals"]),  # experiment.Run
             (o, "marketplace_registration_website", []),
             (o, "obtain_marketplace_jwt", ["marketplace", "url"]),
             (o, "write_private_jwt", ["token"]),
@@ -397,7 +416,7 @@ class ReuseAPI(unittest.TestCase):
         hb = real_hb()
         self.assertEqual(hb.ssh_setup.SCION_CONFIG_DIR, "/etc/scion")
         self.assertEqual(hb.remote.DEFAULT_REQUIRED_TOOLS, ("sha256sum", "nc"))
-        self.assertEqual(Path(hb.orchestration.ROOT).resolve(), Path(SCION_DIR).resolve())
+        self.assertEqual(Path(hb.orchestration.ROOT).resolve(), testsupport.scion_dir().resolve())
         self.assertEqual(hb.orchestration.COMPOSE, Path(hb.orchestration.ROOT) / "gen" / "scion-dc.yml")
         self.assertTrue(callable(hb.ssh_setup.MetricSource) and callable(hb.ssh_setup.MonitoringStack))
 
@@ -417,7 +436,6 @@ class ReuseAPI(unittest.TestCase):
             self.assertNotIn("secret", " ".join(call.args[0]))
 
 
-@needs_scion
 class DockerFlow(unittest.TestCase):
     """The Docker setup, monitoring and teardown calls, with hummbwtester's functions mocked."""
 
@@ -428,8 +446,8 @@ class DockerFlow(unittest.TestCase):
         self.calls = []
 
     def make(self, dry_run=False, experiment=None, **kwargs):
-        return infra.DockerInfra(experiment or docker_experiment(), Path(SCION_DIR), dry_run,
-                                 hb=real_hb(), gen_dir=Path(self.tmp.name), **kwargs)
+        return infra.DockerInfra(experiment or docker_experiment(), testsupport.scion_dir(),
+                                 dry_run, hb=real_hb(), gen_dir=Path(self.tmp.name), **kwargs)
 
     def patch_topology(self):
         o, calls = self.o, self.calls
@@ -536,8 +554,11 @@ class DockerFlow(unittest.TestCase):
         i = self.make()
         i.target_documents = lambda: {n: "[]\n" for n in infra.TARGET_FILES}
         waited = []
+
+        def wait_service(container, url, *_, **__):
+            waited.append((container, url))
         with mock.patch("subprocess.run", run), mock.patch("builtins.print"), \
-                mock.patch.object(infra, "wait_service", lambda c, u, *a, **k: waited.append((c, u))):
+                mock.patch.object(self.o, "wait_service", wait_service):
             self.assertEqual(i.setup_monitoring(), [])
         compose = str(infra.MONITORING_COMPOSE)
         commands = [argv for argv, _ in record if argv[:2] == ["docker", "compose"]]
@@ -565,7 +586,7 @@ class DockerFlow(unittest.TestCase):
         run, record = self.fake_subprocess({infra.PROMETHEUS_CONTAINER: "wgexp-monitoring/prometheus",
                                             infra.GRAFANA_CONTAINER: "wgexp-monitoring/grafana"})
         with mock.patch("subprocess.run", run), mock.patch("builtins.print"), \
-                mock.patch.object(infra, "wait_service"):
+                mock.patch.object(self.o, "wait_service"):
             self.assertEqual(i.setup_monitoring(), [])
 
     def test_monitoring_dry_run_starts_nothing(self):
@@ -599,7 +620,7 @@ class DockerFlow(unittest.TestCase):
     def test_install_binary_copies_only_when_different(self):
         binary = Path(self.tmp.name) / "wireguard-go"
         binary.write_bytes(b"binary")
-        digest = infra.Infra.sha256(binary)
+        digest = hashlib.sha256(b"binary").hexdigest()
         calls = []
 
         def run(cmd, **kw):
@@ -617,6 +638,7 @@ class DockerFlow(unittest.TestCase):
         self.assertEqual({c[-1].split(":")[0] for c in copies},
                          {"tester_1-ff00_0_110", "tester_1-ff00_0_111"})
         self.assertTrue(all(c[-1].endswith(":/share/bin/wireguard-go.new") for c in copies))
+        self.assertFalse([c for c in calls if "bash" in c or "sh" in c])  # no shell in a container
         # dry run copies nothing
         calls.clear()
         i = self.make(dry_run=True)
@@ -659,7 +681,6 @@ class RequiredTools(unittest.TestCase):
                          ("ip", "ping", "sha256sum", "rsync", "dd", "iperf3"))
 
 
-@needs_scion
 class SSHFlow(unittest.TestCase):
     """(c) The SSH inventory, sources, documents and relay specs for experiment-sciera.json.
 
@@ -691,7 +712,7 @@ class SSHFlow(unittest.TestCase):
             self.hosts[key] = FakeHost(key, self.answer)
             return self.hosts[key]
         kwargs.setdefault("host_factory", fake)
-        return infra.SSHInfra(sciera_experiment(), Path(SCION_DIR), dry_run, hb=self.hb,
+        return infra.SSHInfra(sciera_experiment(), testsupport.scion_dir(), dry_run, hb=self.hb,
                               gen_dir=Path(self.tmp.name), **kwargs)
 
     @staticmethod

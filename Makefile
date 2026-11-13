@@ -29,22 +29,18 @@ test: test-go test-experiment
 test-go:
 	go test ./...
 
-# The SCION checkout (hummingbird fork) of the integration tests; the same default as
+# The SCION checkout (hummingbird fork) the Python tests use; the same default as
 # tests/scion-integration.py. Override it with e.g. make test SCION_DIR=~/scion
 SCION_DIR ?= $(abspath $(CURDIR)/../scion)
 # The Python of the virtual environment in .venv when there is one, else python3.
 PYTHON ?= $(if $(wildcard .venv/bin/python3),.venv/bin/python3,python3)
-# The SCION checkout whose hummbwtester the unit tests load: SCION_DIR when given (environment or
-# command line), else the SCION Go module that go.mod pins, so that by default the tests use the
-# hummbwtester version this repository builds with (tests/experiment/testsupport.py).
-TEST_SCION_DIR = $(if $(filter file,$(origin SCION_DIR)),$$(go list -m -f '{{.Dir}}' github.com/scionproto/scion),$(SCION_DIR))
 
 # Unit tests of the experiment runner (tests/experiment). They need no Docker, but they need
-# PyYAML and hummbwtester (TEST_SCION_DIR): without them those tests fail, they are not skipped.
+# PyYAML and hummbwtester from SCION_DIR: without them those tests fail, they are not skipped.
 # Only the jsonschema checks are skipped without jsonschema. -b hides the output of passing tests
 # (preflight messages, warnings) and shows it only for those that fail.
 test-experiment:
-	SCION_DIR="$(TEST_SCION_DIR)" $(PYTHON) -m unittest discover -b -s tests/experiment -p 'test_*.py'
+	SCION_DIR="$(SCION_DIR)" $(PYTHON) -m unittest discover -b -s tests/experiment -p 'test_*.py'
 
 # Runs every SCION integration test on a running tiny topology in SCION_DIR.
 test-integration:

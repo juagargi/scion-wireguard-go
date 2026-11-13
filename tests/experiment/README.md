@@ -173,18 +173,19 @@ the marketplace Note, which is why the runner sets `HUMMINGBIRD_MARKETPLACE_ADDR
 make test-experiment
 ```
 
-This runs `python3 -m unittest discover -s tests/experiment -p 'test_*.py'`. The tests mock Docker and SSH.
-They load hummbwtester (`experiment.Run` uses its `InterruptGuard`, `infra.py` its setup code) from
-`$SCION_DIR`, or, if it is unset, from the SCION Go module that `go.mod` pins (`go list -m`), so by
-default they test against the hummbwtester version this repository builds with
-(`tests/experiment/testsupport.py`). They need PyYAML, and they fail, not skip, if hummbwtester cannot
+This runs `python3 -m unittest discover -s tests/experiment -p 'test_*.py'` with the Python of `.venv`
+when the repository has one (`.venv/bin/python3`), else `python3`. The tests mock Docker and SSH. They
+load hummbwtester (`experiment.Run` uses its `InterruptGuard`, `infra.py` its setup code) from
+`$SCION_DIR`, which `make` sets to `../scion` unless you pass another checkout. Run directly, without
+`make` and without `$SCION_DIR`, they use the SCION Go module that `go.mod` pins (`go list -m`,
+`tests/experiment/testsupport.py`). They need PyYAML, and they fail, not skip, if hummbwtester cannot
 be loaded. Only the schema check is optional: it is skipped without `jsonschema`. For the full set,
-with a virtual environment:
+with a virtual environment in `.venv`, which `make` picks up by itself:
 
 ```bash
-python3 -m venv /tmp/wgexp-venv && /tmp/wgexp-venv/bin/pip install pyyaml bcrypt jsonschema
-PATH=/tmp/wgexp-venv/bin:$PATH make test-experiment                # pinned hummbwtester
-SCION_DIR=$SCION PATH=/tmp/wgexp-venv/bin:$PATH make test-experiment  # your checkout
+python3 -m venv .venv && .venv/bin/pip install pyyaml bcrypt jsonschema
+make test-experiment                     # hummbwtester from ../scion
+make test-experiment SCION_DIR=$SCION    # from another checkout
 ```
 
 ## Troubleshooting
